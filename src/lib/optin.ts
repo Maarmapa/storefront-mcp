@@ -12,12 +12,18 @@
 //                → the expiry is advisory and gets ignored,
 //   - `===` on the signature → leaks the answer byte by byte to a prober,
 //   - no secret configured → the tempting default is "skip verification",
-//                which turns a missing env var into an open door.
+//                which turns a missing env var into an open door,
+//   - a SHORT secret → the HMAC is only as strong as its key. Accepting
+//                `STOCK_ALERT_SIGNING_SECRET=x` means an attacker who guesses
+//                or brute-forces one character can mint a valid token for any
+//                address and POST it themselves, subscribing a victim who
+//                never received mail at all. "Non-empty" is not a key policy.
 //
 // Hence: `v1.<payload>.<hmac>`, expiry inside the signed payload, timing-safe
-// comparison, and FAIL-CLOSED when the secret is missing — no secret means no
-// tokens are issued and none are accepted. The tool then answers "opt-in is
-// not available on this deployment" instead of quietly subscribing people.
+// comparison, a MINIMUM KEY LENGTH, and FAIL-CLOSED when the secret is
+// missing or too weak — in which case no tokens are issued and none are
+// accepted. The tool then answers "opt-in is not available on this
+// deployment" instead of quietly subscribing people.
 //
 // Env: STOCK_ALERT_SIGNING_SECRET (generate with `openssl rand -hex 32`).
 
@@ -26,6 +32,18 @@ import type { LineRef } from './adapter';
 
 /** 48 h: long enough for a human to read mail on Monday, short enough to expire. */
 export const OPT_IN_TTL_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Minimum accepted length for the signing key, in characters.
+ *
+ * 32 is what `openssl rand -hex 32` produces per 16 bytes of entropy — the
+ * documented recipe yields 64, so the floor rejects sloppiness without
+ * rejecting anything reasonable. It is a length check, not an entropy
+ * measurement: 32 identical characters passes. It exists to catch the
+ * `=changeme` / `=x` / `=secret` class of configuration, which is the class
+ * that actually happens.
+ */
+export const MIN_SIGNING_SECRET_LENGTH = 32;
 
 const VERSION = 'v1';
 
@@ -41,13 +59,49 @@ interface TokenPayload {
 }
 
 function secret(): string | null {
-  const s = process.env.STOCK_ALERT_SIGNING_SECRET;
-  return s && s.length > 0 ? s : null;
+  const s = (process.env.STOCK_ALERT_SIGNING_SECRET ?? '').trim();
+  return s.length >= MIN_SIGNING_SECRET_LENGTH ? s : null;
+}
+
+/** Why opt-in is unavailable, when it is. For operator-facing messages only. */
+export type SigningSecretState = 'ok' | 'missing' | 'too_short';
+
+export function signingSecretState(): SigningSecretState {
+  const raw = (process.env.STOCK_ALERT_SIGNING_SECRET ?? '').trim();
+  if (raw.length === 0) return 'missing';
+  return raw.length >= MIN_SIGNING_SECRET_LENGTH ? 'ok' : 'too_short';
 }
 
 /** Is double opt-in usable at all on this deployment? */
 export function optInConfigured(): boolean {
   return secret() !== null;
+}
+
+/**
+ * Where the human confirms — or null, which means NOTHING MAY BE SENT.
+ *
+ * There used to be a fallback to `https://example.com`, and it was the single
+ * fail-OPEN in a flow where everything else fails closed: with the signing
+ * secret set but no site URL, live mode happily mailed a stranger a link to a
+ * domain the operator does not own, carrying a signed token with that
+ * stranger's address inside it. A dead link is bad; a dead link on somebody
+ * else's domain with your customer's address in the query string is worse.
+ *
+ * The URL must be absolute and http(s). A relative path cannot survive a trip
+ * through an email client.
+ */
+export function confirmUrlBase(): string | null {
+  const explicit = (process.env.STOCK_ALERT_CONFIRM_URL ?? '').trim();
+  const site = (process.env.NEXT_PUBLIC_SITE_URL ?? '').trim();
+  const candidate = explicit || (site ? `${site.replace(/\/$/, '')}/api/stock-alert/confirm` : '');
+  if (!candidate) return null;
+  try {
+    const u = new URL(candidate);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return candidate.replace(/\/$/, '');
+  } catch {
+    return null;
+  }
 }
 
 function b64url(buf: Buffer): string {
