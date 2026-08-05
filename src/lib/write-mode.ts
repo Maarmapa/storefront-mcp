@@ -39,6 +39,33 @@ export function stockAlertMode(): WriteMode {
 }
 
 /**
+ * What to do in LIVE mode when the InventoryAdapter cannot reserve units.
+ *
+ * This is the switch behind the oversell that no stateless check can catch.
+ * `getAvailability` describes the past; ten concurrent calls all read "4
+ * left", all pass, and all create an order. The only fix is an atomic hold at
+ * the inventory source (InventoryAdapter.reserve), and an adapter that has no
+ * such operation cannot offer one.
+ *
+ *   refuse (default) → live create_checkout answers "blocked: this deployment
+ *                      cannot hold units", and creates nothing. Dry mode is
+ *                      unaffected, so the whole flow stays testable.
+ *   allow            → the operator has read the above and accepts that
+ *                      concurrent calls can oversell. Every receipt then
+ *                      carries the warning, because the agent is about to
+ *                      promise somebody a delivery.
+ *
+ * Only the exact string "allow" opens it: same asymmetry as the modes above.
+ */
+export type UnreservedPolicy = 'refuse' | 'allow';
+
+export function unreservedCheckoutPolicy(): UnreservedPolicy {
+  return (process.env.CHECKOUT_UNRESERVED ?? '').trim().toLowerCase() === 'allow'
+    ? 'allow'
+    : 'refuse';
+}
+
+/**
  * The sentence appended to a write tool's own description so the agent reads
  * the current mode in tools/list, instead of discovering it by calling.
  */

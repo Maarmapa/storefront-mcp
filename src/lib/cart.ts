@@ -17,6 +17,15 @@
 //    into invented sales. In a tool that takes money, sanitizing means
 //    REJECTING AND EXPLAINING; rewriting the input into something plausible is
 //    fabricating intent.
+//
+// WHAT THIS FILE DELIBERATELY DOES NOT DO: enforce the per-product unit
+// ceiling. It cannot — not correctly. This module only sees how the caller
+// SPELLED each line, and `{slug:'notebook-a4'}` and `{sku:'NB-A4'}` can be the
+// same pile of units. Only the inventory adapter knows that (AvailabilityRow.
+// pool), so the ceiling and the availability check are both evaluated one
+// layer up, on pools, in src/lib/commerce.ts. A limit enforced twice in two
+// places drifts; a limit enforced where the identity is still ambiguous is
+// enforced against the wrong thing.
 
 import type { LineRef } from './adapter';
 import { refKey } from './availability';
@@ -45,8 +54,6 @@ export interface NormalizedCart {
   lines: NormalizedLine[];
   items_invalid_qty: InvalidQtyItem[];
   items_missing_ref: Array<{ index: number; reason: string }>;
-  /** Consolidated totals that exceed the per-product ceiling. Blocked, not trimmed. */
-  items_over_unit_limit: Array<{ slug?: string; sku?: string; qty_requested: number; limit: number }>;
   /** Set when the caller sent more distinct products than the cart allows. */
   too_many_products?: { distinct: number; limit: number };
   /** Set when the raw array was too large to even look at. */
@@ -68,7 +75,8 @@ function str(v: unknown): string | undefined {
 }
 
 /**
- * Validate, consolidate, then measure against the ceilings — in that order.
+ * Validate, consolidate by spelling, then measure the ceilings that do not
+ * need stock identity — in that order.
  *
  * Nothing here talks to the catalog or to inventory: this is purely "what did
  * the caller actually ask for, in canonical form". Keeping it separate is what
@@ -79,7 +87,6 @@ export function normalizeCart(raw: unknown): NormalizedCart {
     lines: [],
     items_invalid_qty: [],
     items_missing_ref: [],
-    items_over_unit_limit: [],
     consolidated: false,
   };
 
@@ -115,6 +122,8 @@ export function normalizeCart(raw: unknown): NormalizedCart {
     }
 
     // Consolidation happens BEFORE any ceiling is measured — see the header.
+    // This merges identical spellings; merging different spellings of the same
+    // pool needs the inventory adapter and happens in commerce.ts.
     const ref: LineRef = sku ? { sku, ...(slug ? { slug } : {}) } : { slug };
     const key = refKey(ref);
     const existing = byKey.get(key);
@@ -132,22 +141,6 @@ export function normalizeCart(raw: unknown): NormalizedCart {
   if (lines.length > MAX_DISTINCT_PRODUCTS) {
     out.too_many_products = { distinct: lines.length, limit: MAX_DISTINCT_PRODUCTS };
     return out;
-  }
-
-  // Over the ceiling BLOCKS the line; it does not quietly become 50.
-  // A quote may clamp and say so, but a tool that creates a payable order must
-  // never hand a human a different quantity than the one that was requested:
-  // the caller has to see the ceiling and decide, and a blocked line is a
-  // decision the caller can act on in one retry.
-  for (const line of lines) {
-    if (line.qty > MAX_UNITS_PER_PRODUCT) {
-      out.items_over_unit_limit.push({
-        slug: line.slug,
-        sku: line.sku,
-        qty_requested: line.qty,
-        limit: MAX_UNITS_PER_PRODUCT,
-      });
-    }
   }
 
   out.lines = lines;

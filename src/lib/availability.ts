@@ -9,16 +9,35 @@
 //
 // Published and available are different questions with different owners
 // (CMS/catalog vs. ERP/POS/inventory). This module asks the second one.
+//
+// And it asks it about a POOL, not about a spelling — see poolKey below.
 
 import type { AvailabilityRow, InventoryAdapter, LineRef } from './adapter';
 
 /**
- * Canonical identity of a line. A SKU wins over a slug: it is the more
- * specific thing, and mixing the two keys is how a cart ends up with the same
- * item counted twice.
+ * Canonical identity of a line AS THE CALLER SPELLED IT. A SKU wins over a
+ * slug: it is the more specific thing.
+ *
+ * This is a request-shape key, NOT a stock identity: `{slug:'notebook-a4'}`
+ * and `{sku:'NB-A4'}` get different keys here even when they are the same
+ * pile of units. Resolving that is the adapter's job — see poolKey.
  */
 export function refKey(ref: LineRef): string {
   return ref.sku ? `sku:${ref.sku}` : `slug:${ref.slug ?? ''}`;
+}
+
+/**
+ * Identity of the UNIT POOL a resolved line draws from.
+ *
+ * The adapter is the only component that can answer this, because it is the
+ * only one that knows a product page and a SKU are backed by the same row.
+ * When it declines to answer, we fall back to the request-shape key — which
+ * is the status quo, and the reason the fallback is called out in the
+ * checkout response instead of being silent: two lines with no pool identity
+ * are two lines that MIGHT be one, and the tool says so.
+ */
+export function poolKey(row: AvailabilityRow): string {
+  return row.pool ? `pool:${row.pool}` : refKey(row);
 }
 
 export const NO_INVENTORY_SOURCE = 'no inventory source configured on this deployment';
@@ -67,17 +86,25 @@ export async function resolveAvailability(
       };
     }
     const units = row.units;
+    const pool = typeof row.pool === 'string' && row.pool.length > 0 ? { pool: row.pool } : {};
     if (!row.verified || units == null || typeof units !== 'number' || !Number.isFinite(units)) {
       // Also catches an adapter that claims verified:true with a null count —
       // normalize the contradiction to "unknown" instead of trusting the flag.
       return {
         ...ref,
+        ...pool,
         units: null,
         verified: false,
         reason: row.reason ?? 'inventory source could not verify this line',
       };
     }
-    return { ...ref, units: Math.max(0, Math.floor(units)), verified: true, reason: row.reason };
+    return {
+      ...ref,
+      ...pool,
+      units: Math.max(0, Math.floor(units)),
+      verified: true,
+      reason: row.reason,
+    };
   });
 }
 
@@ -86,7 +113,13 @@ export async function resolveAvailability(
  * before charging a human, "I don't know" and "there is none" are the same
  * answer. Read-side tools are free to be more relaxed — showing an unknown as
  * unknown costs nobody money.
+ *
+ * `requested` must be the POOL total, not one line's qty. Passing a single
+ * line's quantity here is the bug in guard rail 3 wearing a different hat.
  */
-export function blocksWrite(row: AvailabilityRow, requested: number): boolean {
+export function blocksWrite(
+  row: Pick<AvailabilityRow, 'units' | 'verified'>,
+  requested: number,
+): boolean {
   return !row.verified || row.units == null || row.units < requested;
 }

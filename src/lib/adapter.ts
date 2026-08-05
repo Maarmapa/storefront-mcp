@@ -7,16 +7,18 @@
 //     ANY anonymous agent on the internet. Treat it like your public website.
 //   - OpsAdapter       → back-office data (revenue, orders, exact stock).
 //     Only reachable with a valid Bearer token (env MCP_SECRET).
-//   - InventoryAdapter → how many units you can actually sell right now.
+//   - InventoryAdapter → how many units you can actually sell right now, and
+//     (optionally but importantly) how to HOLD them.
 //   - CheckoutAdapter  → creates a real order.
 //   - NotifyAdapter    → back-in-stock subscriptions (double opt-in).
 //
-// The last three are OPTIONAL and drive the write tools. A deployment that
-// does not implement them does not break: the corresponding tools are simply
-// never announced in tools/list (see visibleTools in src/lib/protocol.ts).
+// Everything except CatalogAdapter is OPTIONAL, and so are four of the six
+// catalog methods. Optionality is not politeness: a method you do not
+// implement removes the matching tool from tools/list, so no agent is ever
+// offered a tool this deployment has no honest way to answer.
 //
-// To plug in your own store, implement CatalogAdapter (and optionally the
-// rest) and register it in src/lib/adapters/index.ts.
+// To plug in your own store, implement CatalogAdapter (two required methods)
+// and register it in src/lib/adapters/index.ts.
 
 // ───────────────────────── catalog types ─────────────────────────
 
@@ -55,13 +57,20 @@ export interface SearchResult {
 }
 
 /**
- * A "variant chart": one product line whose real inventory lives per-variant
- * (per color, per size, per grit...). This is the kind of tool a generic
- * platform MCP will never generate for you, because it needs your domain
- * knowledge: which codes exist, how they map to SKUs, what stock each one
- * has right now.
+ * A VARIANT CHART: one product line whose real inventory lives per-variant.
+ *
+ * The axis is whatever your catalog actually varies on — color, shade, size,
+ * grit, roast, capacity, edition. The type is deliberately neutral about
+ * which: `code` + `name` + `sku` describe any of them, and `swatch_hex` is an
+ * OPTIONAL display hint for the charts that happen to be color charts.
+ *
+ * This is the kind of tool a generic platform MCP will never generate for
+ * you, because it needs your domain knowledge: which codes exist, how they
+ * map to SKUs, what stock each one has right now. If your catalog has no such
+ * axis, do not implement it — `list_variant_charts` and `get_variant_chart`
+ * then simply do not exist on your deployment.
  */
-export interface ColorCard {
+export interface VariantChart {
   slug: string;
   brand_name: string;
   product_name: string;
@@ -70,26 +79,30 @@ export interface ColorCard {
   url?: string;
   /** false when the stock backend could not be reached: variants then carry stock: null. */
   stock_verified: boolean;
-  colors: ColorVariant[];
+  /** What this chart varies on, for the agent's benefit: "color", "size", "grit"... */
+  axis?: string;
+  variants: Variant[];
 }
 
-export interface ColorVariant {
+export interface Variant {
   code: string;
   name: string;
   sku: string | null;
-  hex: string | null;
+  /** OPTIONAL display hint, only meaningful for color-like axes. */
+  swatch_hex?: string | null;
   /** null = unknown (unmapped variant or stock backend down). Never invent a number. */
   stock: number | null;
   available: boolean | null;
 }
 
-export interface BrandSummary {
+export interface VariantChartSummary {
   slug: string;
   brand_name: string;
   product_name: string;
-  colors_total: number;
+  variants_total: number;
   base_price: number | null;
   currency: string;
+  axis?: string;
   url?: string;
 }
 
@@ -99,19 +112,45 @@ export interface QuoteItem {
   qty: number;
 }
 
+/**
+ * One non-line amount on a total: tax, shipping, a discount, a surcharge.
+ *
+ * It exists because a money contract with only `subtotal` quietly assumes
+ * tax-inclusive pricing and free shipping — true for some stores, false for
+ * most of the EU and the US. Amounts are signed: a discount is negative.
+ */
+export interface MoneyLine {
+  kind: 'tax' | 'shipping' | 'discount' | 'surcharge' | 'other';
+  label: string;
+  /** Signed, in the same currency as the rest of the document. */
+  amount: number;
+}
+
 export interface Quote {
   items: Array<{
     slug?: string;
     sku?: string;
     name: string;
+    /**
+     * The quantity actually priced. MUST equal the qty that was requested for
+     * this line: the checkout path reconciles the two and refuses when they
+     * differ, because a quote that silently trims 40 units to 10 and reports
+     * the price of 10 is how an order for 40 gets charged as 10.
+     */
     qty: number;
     unit_price: number;
+    /** MUST equal unit_price × qty at the currency's precision. Reconciled too. */
     line_total: number;
   }>;
-  /** Items that could not be resolved or are out of stock. */
+  /** Items that could not be resolved, are out of stock, or asked for an unquotable qty. */
   rejected: Array<{ slug?: string; sku?: string; reason: string }>;
+  /** Sum of line_total. Taxes/shipping/discounts do NOT belong here. */
   subtotal: number;
   currency: string;
+  /** Tax, shipping, discounts. Omit when your prices really are final. */
+  charges?: MoneyLine[];
+  /** subtotal + charges. Omit when it equals subtotal. */
+  total?: number;
   /**
    * Link the agent hands to the HUMAN to complete payment. The MCP server
    * never charges anyone: it quotes, the human pays through your normal flow.
@@ -154,12 +193,58 @@ export interface AvailabilityRow extends LineRef {
   verified: boolean;
   /** Why it could not be verified. Travels all the way to the agent. */
   reason?: string;
+  /**
+   * IDENTITY OF THE UNIT POOL this line draws from — the answer to "which
+   * physical pile of stock does this consume?".
+   *
+   * Why the contract needs it: a plain product has a page AND a SKU over ONE
+   * pile of units. `{slug:'notebook-a4'}` and `{sku:'NB-A4'}` are two
+   * spellings of the same thing, so a server that treats them as two lines
+   * checks 50 units against 60 twice and sells 100. Only the adapter can
+   * resolve that identity — it is the only component that knows which slug
+   * and which SKU are backed by the same row.
+   *
+   * Return a stable string per pile (an internal product/variant id is
+   * ideal). Lines whose pool matches are summed before any limit or
+   * availability check. Omit it ONLY when every ref you serve is already
+   * canonical; when it is absent the caller falls back to the ref itself and
+   * cannot catch cross-spelling collisions.
+   */
+  pool?: string;
 }
+
+/** One priced line of an order. Prices are computed server-side, always. */
+export interface CheckoutLine extends LineRef {
+  name: string;
+  qty: number;
+  unit_price: number;
+  line_total: number;
+}
+
+/**
+ * A request to HOLD units while an order is created.
+ *
+ * `ref` is an idempotency key: the protocol layer generates one per
+ * create_checkout attempt and never reuses it, so a retried reservation is
+ * the same reservation rather than a second hold.
+ */
+export interface ReservationRequest {
+  lines: Array<LineRef & { qty: number }>;
+  ref: string;
+}
+
+export type ReservationResult =
+  | { ok: true; reservation_id: string }
+  | {
+      ok: false;
+      /** Which lines could not be held, and how many were actually left. */
+      conflicts: Array<LineRef & { requested: number; available: number | null; reason?: string }>;
+    };
 
 /**
  * OPTIONAL. The single source of truth for "how many units are there".
  *
- * It must be the SAME source the read tools use (get_color_card,
+ * It must be the SAME source the read tools use (get_variant_chart,
  * get_stock_bulk); a write path that checks a different source than the one it
  * shows the customer is a bug waiting for a busy Friday.
  *
@@ -172,25 +257,52 @@ export interface AvailabilityRow extends LineRef {
  */
 export interface InventoryAdapter {
   getAvailability(refs: LineRef[]): Promise<AvailabilityRow[]>;
-}
 
-/** One priced line of an order. Prices are computed server-side, always. */
-export interface CheckoutLine extends LineRef {
-  name: string;
-  qty: number;
-  unit_price: number;
-  line_total: number;
+  /**
+   * OPTIONAL, and the difference between a checkout that can oversell and one
+   * that cannot.
+   *
+   * READ THIS BEFORE SKIPPING IT. `getAvailability` answers a question about
+   * the past: it says what was true when it ran. Ten concurrent calls all read
+   * "4 units left", all pass the check, and all create an order — 40 units
+   * sold against 4, with every guard rail green. Nothing in a stateless check
+   * can prevent that, because the check does not CHANGE anything. Only an
+   * atomic decrement can.
+   *
+   * Implement it as one atomic operation against your stock source:
+   *   UPDATE stock SET reserved = reserved + :qty
+   *   WHERE id = :id AND (on_hand - reserved) >= :qty
+   * and report `ok:false` with the conflicting lines when it does not apply to
+   * every line. All-or-nothing: a partial hold is a cart nobody asked for.
+   *
+   * When this method is absent, `create_checkout` refuses to create live
+   * orders unless the operator explicitly accepts the risk (see
+   * CHECKOUT_UNRESERVED in src/lib/write-mode.ts). Dry mode always works.
+   */
+  reserve?(req: ReservationRequest): Promise<ReservationResult>;
+
+  /**
+   * OPTIONAL, and required for `reserve` to be safe: release a hold when the
+   * order that motivated it could not be created. Without it a failed
+   * checkout leaks units until your reservations expire.
+   */
+  release?(reservationId: string): Promise<void>;
 }
 
 /**
  * What the protocol layer hands to a CheckoutAdapter. By the time this exists,
  * the guard rails already ran: quantities are valid integers, duplicate lines
- * are consolidated, every line was priced from the catalog, and every line was
- * verified against the inventory source. The adapter does NOT re-decide any of
- * that — it persists the order and returns a payment link.
+ * are consolidated (including across slug/sku spellings of the same pool),
+ * every line was priced from the catalog and reconciled against its quote,
+ * every line was verified against the inventory source, and — when the
+ * inventory adapter can reserve — the units are already held.
+ *
+ * The adapter does NOT re-decide any of that. It persists the order, applies
+ * whatever tax/shipping/discount its backend owns, and returns a payment link.
  */
 export interface CheckoutDraft {
   lines: CheckoutLine[];
+  /** Sum of line_total, computed server-side from the catalog. */
   subtotal: number;
   currency: string;
   /**
@@ -201,13 +313,25 @@ export interface CheckoutDraft {
   customer_email?: string;
   note?: string;
   ref?: string;
+  /** Present when the inventory adapter held the units for this draft. */
+  reservation_id?: string;
 }
 
 export interface CheckoutReceipt {
   /** Short public id (e.g. "AB-3F2K9") — never the internal DB id. */
   order_short_id: string;
+  /**
+   * What the human will actually be asked to pay. It MAY differ from
+   * draft.subtotal — that is the whole point of the field — but when it does,
+   * say why in `charges`, because the tool response shows both numbers to an
+   * agent that will read them out loud to a person.
+   */
   total: number;
   currency: string;
+  /** Echo of the line subtotal you were given, if you want it in the receipt. */
+  subtotal?: number;
+  /** Tax, shipping, discounts: whatever explains total − subtotal. */
+  charges?: MoneyLine[];
   /** Link the agent hands to the HUMAN so they can pay. */
   payment_url?: string | null;
   note?: string;
@@ -215,13 +339,11 @@ export interface CheckoutReceipt {
 
 /**
  * OPTIONAL. Creates a real order. Implementing this is what turns the server
- * from read-only into something that can cost you money, so it is gated twice:
- * the tool only exists when this adapter AND an InventoryAdapter are present,
- * and it only takes effect when CHECKOUT_MODE=live.
- *
- * Note for implementers: an order typically does NOT reserve stock. If that is
- * true for you, the availability check in the protocol layer is the only thing
- * standing between an agent loop and overselling.
+ * from read-only into something that can cost you money, so it is gated
+ * three times: the tool only exists when this adapter AND an InventoryAdapter
+ * are present, it only takes effect when CHECKOUT_MODE=live, and in live mode
+ * it only runs when the units could be reserved (or the operator explicitly
+ * accepted unreserved checkout).
  */
 export interface CheckoutAdapter {
   createCheckout(draft: CheckoutDraft): Promise<CheckoutReceipt>;
@@ -229,8 +351,20 @@ export interface CheckoutAdapter {
 
 /** The one message a caller-supplied address is allowed to receive. */
 export interface OptInEmail {
+  /** The address as typed (trimmed and lowercased). This is what you mail. */
   email: string;
+  /**
+   * Canonical identity of the MAILBOX behind that address — plus-tags removed
+   * and, for providers that ignore them, dots removed. Persist this alongside
+   * the send: it is the key `countOptInEmails` is asked about, and the reason
+   * `victim+1@`, `victim+2@` and `v.i.c.t.i.m@` cannot each get their own
+   * quota.
+   */
+  recipient_key: string;
   product_name: string;
+  product_slug: string;
+  /** Present when the alert is for one specific variant rather than the line. */
+  variant_sku?: string;
   product_url?: string;
   /** Page where the human confirms. The page writes nothing on GET. */
   confirm_url: string;
@@ -257,6 +391,25 @@ export interface NotifyAdapter {
   isSubscribed(email: string, ref: LineRef): Promise<boolean>;
   sendOptInEmail(msg: OptInEmail): Promise<void>;
   confirmSubscription(email: string, ref: LineRef): Promise<{ created: boolean }>;
+
+  /**
+   * OPTIONAL, and the only way the per-recipient quota is worth the name.
+   *
+   * How many opt-in emails have gone to this mailbox since `since`? Count
+   * rows in YOUR storage, keyed by `recipient_key` (see OptInEmail) — that
+   * makes the quota survive a cold start, a redeploy and N instances, which
+   * an in-process counter does not.
+   *
+   * Pass `ref` to ask the narrower question "…about this product", which the
+   * caller uses to avoid re-sending a confirmation nobody has acted on yet.
+   *
+   * May throw: the caller fails closed and sends nothing.
+   *
+   * Without it, the quota falls back to the in-memory limiter in
+   * src/lib/ratelimit.ts, which is friction and not a ceiling — and the tool
+   * response says so out loud instead of promising a limit it cannot hold.
+   */
+  countOptInEmails?(recipientKey: string, since: Date, ref?: LineRef): Promise<number>;
 }
 
 // ───────────────────────── ops types (gated) ─────────────────────────
@@ -313,21 +466,46 @@ export interface SalesSummary {
 
 // ───────────────────────── the two contracts ─────────────────────────
 
-/** Public storefront. Everything here is world-readable by design. */
+/**
+ * Public storefront. Everything here is world-readable by design.
+ *
+ * Only the first two methods are required. The rest are capabilities: each
+ * one you leave out removes its tool from tools/list, which is why there is
+ * no reason to write a stub that returns `[]` or `null` — a stub turns "this
+ * store has no variant charts" into "this store has a variant chart tool that
+ * never finds anything", and an agent cannot tell those apart.
+ */
 export interface CatalogAdapter {
   searchProducts(query: string, limit: number): Promise<SearchResult>;
   getProduct(slug: string): Promise<Product | null>;
-  listBrands(): Promise<BrandSummary[]>;
-  /** Return null when the slug does not resolve to a known chart. */
-  getColorCard(brand: string): Promise<ColorCard | null>;
-  getPromotions(limit: number, brand?: string): Promise<{ total: number; promotions: SearchHit[] }>;
-  getQuote(items: QuoteItem[], ref?: string): Promise<Quote>;
+
+  /** OPTIONAL → enables `get_promotions`. */
+  getPromotions?(limit: number, brand?: string): Promise<{ total: number; promotions: SearchHit[] }>;
+
+  /**
+   * OPTIONAL → enables `get_quote`.
+   *
+   * Two rules the checkout path depends on:
+   *   - echo the `slug`/`sku` you were given on each priced line,
+   *   - price the qty you were ASKED for, or reject the line. Never quote a
+   *     different quantity than the one requested; create_checkout compares
+   *     them and refuses the whole cart when they disagree.
+   */
+  getQuote?(items: QuoteItem[], ref?: string): Promise<Quote>;
+
+  /** OPTIONAL → enables `list_variant_charts` (announced together with the next one). */
+  listVariantCharts?(): Promise<VariantChartSummary[]>;
+
+  /** OPTIONAL → enables `get_variant_chart`. Return null when the slug does not resolve. */
+  getVariantChart?(chart: string): Promise<VariantChart | null>;
 }
 
 /**
- * Back office. OPTIONAL: if your deployment does not provide an OpsAdapter,
- * the sensitive tools respond with an error even to authenticated callers.
- * Implementations MUST anonymize customer PII (see OrderDetail).
+ * Back office. OPTIONAL: a deployment without an OpsAdapter does not announce
+ * the five sensitive tools at all — not even to an authenticated caller,
+ * because a tool that can only answer "not configured" is noise with a token
+ * in front of it. Implementations MUST anonymize customer PII (see
+ * OrderDetail).
  */
 export interface OpsAdapter {
   getStockBulk(skus: string[]): Promise<{ results: StockRow[] }>;
@@ -343,7 +521,7 @@ export interface OpsAdapter {
  * Every optional field is a capability, and capabilities decide which tools
  * exist at all — not a config flag that lies about what the server can do:
  *
- *   ops       → the 5 back-office tools answer (they still need the token).
+ *   ops       → the 5 back-office tools are announced (to authorized callers).
  *   inventory → availability can be verified.
  *   checkout  → `create_checkout` is announced, but ONLY together with
  *               `inventory`: without an inventory source every call would be
