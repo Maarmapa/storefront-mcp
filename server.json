@@ -7,13 +7,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Maarmapa/storefront-mcp",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "storefront-mcp",
-      "version": "1.1.0",
+      "version": "2.0.0",
       "transport": {
         "type": "stdio"
       },
@@ -27,7 +27,7 @@
         },
         {
           "name": "MCP_SECRET",
-          "description": "Unlocks the 5 sensitive back-office tools (stock, orders, sales). On stdio the presence of this variable in the server process env unlocks them; leave it unset to expose only the 8 public tools.",
+          "description": "Unlocks the sensitive back-office tools (stock, orders, sales) when the adapter provides them. On stdio the presence of this variable in the server process env unlocks them; leave it unset to expose only the public tools.",
           "isRequired": false,
           "isSecret": true
         },
@@ -54,15 +54,35 @@
         },
         {
           "name": "STOCK_ALERT_SIGNING_SECRET",
-          "description": "HMAC key for double opt-in confirmation links. Without it no link can be issued and subscribe_stock_alert refuses — it never subscribes anyone without confirmation.",
+          "description": "HMAC key for double opt-in confirmation links, minimum 32 characters. Without a usable one no link can be issued and subscribe_stock_alert refuses \u2014 it never subscribes anyone without confirmation.",
           "isRequired": false,
           "isSecret": true
         },
         {
           "name": "STOCK_ALERT_CONFIRM_URL",
-          "description": "URL of the opt-in confirmation page (GET renders a button, POST performs the write).",
+          "description": "Public URL of the opt-in confirmation page (GET renders a button, POST performs the write). Required for STOCK_ALERT_MODE=live: with no URL the tool refuses instead of mailing a dead link. `storefront-mcp --http` serves that page at /api/stock-alert/confirm.",
           "isRequired": false,
           "isSecret": false
+        },
+        {
+          "name": "CHECKOUT_UNRESERVED",
+          "description": "In live mode, what to do when the inventory adapter cannot HOLD units: \"refuse\" (default, no order is created) or \"allow\" (accepts that concurrent calls can oversell).",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "refuse"
+        },
+        {
+          "name": "TRUSTED_PROXY_HEADER",
+          "description": "Name of the header your edge writes with the client IP (e.g. x-vercel-forwarded-for, cf-connecting-ip). Unset means forwarding headers are ignored, because without a proxy a caller can write them.",
+          "isRequired": false,
+          "isSecret": false
+        },
+        {
+          "name": "STOCK_ALERT_PAGE_LOCALE",
+          "description": "Language of the customer-facing opt-in confirmation page: \"en\" (default) or \"es\".",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "en"
         }
       ]
     }
