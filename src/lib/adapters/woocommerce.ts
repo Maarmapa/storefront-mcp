@@ -7,9 +7,21 @@
 // revenue data require the authenticated WC REST API (consumer key/secret)
 // and you should think twice before wiring that in at all.
 //
+// It also does NOT implement InventoryAdapter, CheckoutAdapter or
+// NotifyAdapter, and that is a decision rather than an omission. Consequence,
+// by design: with CATALOG_ADAPTER=woocommerce the write tools are never
+// announced. An agent talking to this adapter cannot create an order, because
+// nothing here can answer "how many units are there" — and a checkout tool
+// without an inventory source is an oversell tool with extra steps.
+//
+// The TODO blocks at the bottom of this file describe what each contract needs
+// from a WooCommerce install. They are intentionally not half-implemented:
+// guessing at somebody else's stock semantics is precisely the failure this
+// template is about.
+//
 // Env vars:
 //   WOO_BASE_URL   e.g. https://shop.example.com  (no trailing slash)
-//   STORE_CURRENCY e.g. USD | EUR | CLP           (default USD)
+//   STORE_CURRENCY e.g. USD | EUR                 (default USD)
 
 import type {
   BrandSummary,
@@ -159,3 +171,68 @@ export class WooCommerceCatalogAdapter implements CatalogAdapter {
     };
   }
 }
+
+// ───────────────────── TODO: the write-side contracts ─────────────────────
+//
+// Nothing below is implemented. Each block says what the contract needs and
+// which WooCommerce-specific decision only you can make. Implement one, export
+// it, and register it in src/lib/adapters/index.ts — the matching tool starts
+// being announced the moment the capability exists.
+//
+// ── InventoryAdapter (implement this FIRST; create_checkout requires it) ──
+//
+// Needs: units sellable RIGHT NOW per slug/sku, plus an honest "I don't know".
+//
+//   - `is_in_stock` from the Store API is a BOOLEAN, not a count. It cannot
+//     satisfy this contract on its own: it answers "purchasable?", and this
+//     contract answers "how many?". Do not map true → some large number.
+//   - `stock_quantity` exists on the authenticated WC REST API
+//     (/wp-json/wc/v3/products), but only when "Manage stock" is enabled on
+//     that product or variation. When stock management is OFF, the correct
+//     answer is `{units: null, verified: false, reason: 'stock management is
+//     disabled for this product'}` — NOT a number you inferred.
+//   - Variations live at /products/<id>/variations and have their own
+//     stock_quantity; a parent-level number is meaningless for a variant SKU.
+//   - Whatever source you pick, SUBTRACT what is already committed elsewhere
+//     (unpaid orders on hold, picking lists, another sales channel). "On the
+//     shelf" is not "sellable to this customer", and the gap between the two
+//     is where overselling lives.
+//   - It is fine to throw on a backend failure: resolveAvailability() turns a
+//     throw into every line being unverifiable, which blocks writes. Returning
+//     zeros or optimistic guesses is the only wrong answer.
+//
+// ── CheckoutAdapter ──
+//
+// Needs: persist an order from an ALREADY-VALIDATED draft and return a payment
+// link. Do not re-decide quantities or re-price: the protocol layer priced
+// every line from the catalog and verified every line against inventory.
+//
+//   - Option A: Store API cart endpoints (POST /cart/add-item with a
+//     Cart-Token, then hand the human /checkout). No admin credentials.
+//   - Option B: authenticated WC REST API POST /orders with status
+//     "pending"/"on-hold", then return the order's payment URL.
+//   - Note whether your setup reserves stock at order creation. In stock
+//     WooCommerce, "hold stock (minutes)" only applies to unpaid orders with
+//     stock management on; assume NO reservation unless you verified it, and
+//     say so in the receipt note.
+//   - Emails: send to the OPERATOR at a fixed address you configure. The
+//     customer_email on the draft was typed by an agent, so the customer's
+//     own confirmation belongs on the payment webhook, where there is finally
+//     evidence that the human exists and wanted this.
+//
+// ── NotifyAdapter ──
+//
+// Needs: isSubscribed / sendOptInEmail / confirmSubscription.
+//
+//   - Store subscriptions in your own table with a UNIQUE index on
+//     (email, product_ref), and treat a unique-violation on insert as SUCCESS
+//     so confirmation stays idempotent.
+//   - `isSubscribed` must be allowed to throw rather than returning false on
+//     error: the caller fails closed and sends nothing, which is the point.
+//   - sendOptInEmail is the only message this flow may send to a
+//     caller-supplied address. wp_mail() will work; a real ESP is better,
+//     because you will want delivery logs the day someone asks why they got
+//     mail from your shop.
+//   - Set STOCK_ALERT_CONFIRM_URL to the page that serves the confirmation
+//     (see src/app/api/stock-alert/confirm/route.ts) and keep the rule that
+//     page enforces: GET renders, POST writes.
