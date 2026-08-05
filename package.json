@@ -1,0 +1,31 @@
+{
+  "name": "storefront-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP server template for e-commerce storefronts: public catalog tools for AI agents, token-gated back-office tools for you. Next.js App Router, adapter-based.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ecommerce",
+    "ai-agents",
+    "nextjs",
+    "woocommerce"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "^15.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}

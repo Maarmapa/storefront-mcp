@@ -1,0 +1,141 @@
+{
+  "store": {
+    "name": "Demo Art Supply",
+    "currency": "USD",
+    "domain": "example.com"
+  },
+  "products": [
+    {
+      "slug": "chromaflow-classic-marker",
+      "name": "Chromaflow Classic Marker (single)",
+      "brand": "Chromaflow",
+      "category": "markers",
+      "price": 4.5,
+      "availability": "in_stock",
+      "description": "Dual-tip alcohol marker. Sold per color — see the Chromaflow Classic color card for available shades.",
+      "image": null
+    },
+    {
+      "slug": "chromaflow-classic-set-12",
+      "name": "Chromaflow Classic Set x12 Basic Colors",
+      "brand": "Chromaflow",
+      "category": "markers",
+      "price": 49.9,
+      "availability": "in_stock",
+      "description": "Starter set of 12 dual-tip alcohol markers in basic colors.",
+      "image": null
+    },
+    {
+      "slug": "tintoria-leather-dye-1oz",
+      "name": "Tintoria Leather Dye 1oz (single)",
+      "brand": "Tintoria",
+      "category": "leather",
+      "price": 6.9,
+      "availability": "in_stock",
+      "description": "Penetrating dye for natural, unfinished leather. Sold per shade — see the Tintoria Standard color card.",
+      "image": null
+    },
+    {
+      "slug": "tintoria-matte-finisher-4oz",
+      "name": "Tintoria Matte Finisher 4oz",
+      "brand": "Tintoria",
+      "category": "leather",
+      "price": 9.9,
+      "availability": "in_stock",
+      "description": "Water-based matte sealer for dyed or painted leather.",
+      "image": null
+    },
+    {
+      "slug": "roundhouse-detail-brush-set",
+      "name": "Roundhouse Detail Brush Set x5",
+      "brand": "Roundhouse",
+      "category": "brushes",
+      "price": 12.5,
+      "availability": "out_of_stock",
+      "description": "Five synthetic round brushes, sizes 000 to 4.",
+      "image": null
+    },
+    {
+      "slug": "fieldbook-sketch-a5",
+      "name": "Fieldbook Sketch A5 180gsm",
+      "brand": "Fieldbook",
+      "category": "paper",
+      "price": 8.0,
+      "availability": "in_stock",
+      "description": "A5 sketchbook, 60 sheets of 180gsm marker-friendly paper.",
+      "image": null
+    }
+  ],
+  "colorCards": [
+    {
+      "slug": "chromaflow-classic",
+      "brand_name": "Chromaflow",
+      "product_name": "Classic Marker",
+      "base_price": 4.5,
+      "colors": [
+        { "code": "W00", "name": "Warm Gray 00", "sku": "CF-W00", "hex": "#EDEAE4", "stock": 14 },
+        { "code": "W3", "name": "Warm Gray 3", "sku": "CF-W3", "hex": "#C9C2B6", "stock": 6 },
+        { "code": "R21", "name": "Poppy Red", "sku": "CF-R21", "hex": "#D8402F", "stock": 0 },
+        { "code": "B05", "name": "Cerulean", "sku": "CF-B05", "hex": "#2E7DB3", "stock": 9 },
+        { "code": "Y13", "name": "Naples Yellow", "sku": "CF-Y13", "hex": "#EFCB58", "stock": 3 },
+        { "code": "G09", "name": "Leaf Green", "sku": "CF-G09", "hex": "#4E9A51", "stock": null }
+      ]
+    },
+    {
+      "slug": "tintoria-standard",
+      "brand_name": "Tintoria",
+      "product_name": "Standard Leather Dye 1oz",
+      "base_price": 6.9,
+      "colors": [
+        { "code": "101", "name": "Jet Black", "sku": "TN-101", "hex": "#141414", "stock": 22 },
+        { "code": "104", "name": "Rich Brown", "sku": "TN-104", "hex": "#5B3A24", "stock": 11 },
+        { "code": "112", "name": "Oxblood", "sku": "TN-112", "hex": "#5E2129", "stock": 0 },
+        { "code": "120", "name": "Navy", "sku": "TN-120", "hex": "#1E2A4A", "stock": 7 }
+      ]
+    }
+  ],
+  "promotions": ["chromaflow-classic-set-12", "fieldbook-sketch-a5"],
+  "orders": [
+    {
+      "short_id": "DM-7K2QX",
+      "status": "dispatched",
+      "total": 63.7,
+      "subtotal": 59.8,
+      "shipping": 3.9,
+      "items": [
+        { "sku": "CF-SET12", "name": "Chromaflow Classic Set x12", "qty": 1, "unit_price": 49.9 },
+        { "sku": "TN-104", "name": "Tintoria Dye Rich Brown", "qty": 1, "unit_price": 6.9 },
+        { "sku": null, "name": "Fieldbook Sketch A5", "qty": 1, "unit_price": 3.0 }
+      ],
+      "created_at": "2026-07-28T14:03:00Z",
+      "paid_at": "2026-07-28T14:05:00Z",
+      "dispatched_at": "2026-07-29T10:20:00Z"
+    },
+    {
+      "short_id": "DM-9PF3A",
+      "status": "paid",
+      "total": 20.7,
+      "subtotal": 20.7,
+      "shipping": 0,
+      "items": [
+        { "sku": "TN-101", "name": "Tintoria Dye Jet Black", "qty": 3, "unit_price": 6.9 }
+      ],
+      "created_at": "2026-08-01T09:12:00Z",
+      "paid_at": "2026-08-01T09:13:00Z",
+      "dispatched_at": null
+    },
+    {
+      "short_id": "DM-2XVB8",
+      "status": "pending",
+      "total": 9.0,
+      "subtotal": 9.0,
+      "shipping": 0,
+      "items": [
+        { "sku": "CF-W00", "name": "Chromaflow Warm Gray 00", "qty": 2, "unit_price": 4.5 }
+      ],
+      "created_at": "2026-08-03T18:40:00Z",
+      "paid_at": null,
+      "dispatched_at": null
+    }
+  ]
+}
