@@ -1,7 +1,7 @@
 {
   "name": "storefront-mcp",
-  "version": "1.0.1",
-  "description": "MCP server template for e-commerce storefronts: public catalog tools for AI agents, token-gated back-office tools for you. Runs standalone via `npx storefront-mcp` (stdio) or as a Next.js App Router route.",
+  "version": "1.1.0",
+  "description": "MCP server template for e-commerce storefronts: public catalog tools for AI agents, guarded write tools (checkout, back-in-stock alerts), token-gated back-office tools for you. Runs standalone via `npx storefront-mcp` (stdio) or as a Next.js App Router route.",
   "keywords": [
     "mcp",
     "model-context-protocol",

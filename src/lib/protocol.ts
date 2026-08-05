@@ -25,7 +25,12 @@ export type { CallContext } from './commerce';
 export { ToolCallError } from './errors';
 
 export const PROTOCOL_VERSION = '2025-06-18';
-export const SERVER_VERSION = '1.0.1';
+/**
+ * The advertised server version. It MUST match `version` in package.json and
+ * both `version` fields in server.json — clients see this one, npm sees the
+ * second, and the MCP Registry sees the third. Bump the three together.
+ */
+export const SERVER_VERSION = '1.1.0';
 
 export function getServerName(): string {
   return process.env.MCP_SERVER_NAME || 'storefront-mcp';
@@ -34,7 +39,7 @@ export function getServerName(): string {
 export function getServerDescription(): string {
   return (
     process.env.MCP_SERVER_DESCRIPTION ||
-    'Storefront catalog over MCP: products, variant charts, promotions, quotes.'
+    'Storefront over MCP: products, variant charts, promotions, quotes, guarded checkout and back-in-stock alerts.'
   );
 }
 

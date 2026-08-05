@@ -7,13 +7,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Maarmapa/storefront-mcp",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "storefront-mcp",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "transport": {
         "type": "stdio"
       },
@@ -27,7 +27,7 @@
         },
         {
           "name": "MCP_SECRET",
-          "description": "Unlocks the 5 sensitive back-office tools (stock, orders, sales). On stdio the presence of this variable in the server process env unlocks them; leave it unset to expose only the 6 public catalog tools.",
+          "description": "Unlocks the 5 sensitive back-office tools (stock, orders, sales). On stdio the presence of this variable in the server process env unlocks them; leave it unset to expose only the 8 public tools.",
           "isRequired": false,
           "isSecret": true
         },
@@ -37,6 +37,32 @@
           "isRequired": false,
           "isSecret": false,
           "default": "storefront-mcp"
+        },
+        {
+          "name": "CHECKOUT_MODE",
+          "description": "Kill switch for create_checkout: \"off\" (not announced), \"dry\" (runs every guard rail and creates nothing) or \"live\". Only the exact string \"live\" arms it.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "dry"
+        },
+        {
+          "name": "STOCK_ALERT_MODE",
+          "description": "Kill switch for subscribe_stock_alert: \"off\", \"dry\" (no email leaves) or \"live\". Only the exact string \"live\" arms it.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "dry"
+        },
+        {
+          "name": "STOCK_ALERT_SIGNING_SECRET",
+          "description": "HMAC key for double opt-in confirmation links. Without it no link can be issued and subscribe_stock_alert refuses — it never subscribes anyone without confirmation.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "STOCK_ALERT_CONFIRM_URL",
+          "description": "URL of the opt-in confirmation page (GET renders a button, POST performs the write).",
+          "isRequired": false,
+          "isSecret": false
         }
       ]
     }
