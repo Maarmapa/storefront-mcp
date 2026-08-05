@@ -1,13 +1,21 @@
-# Publica server.json al Registro MCP oficial (registry.modelcontextprotocol.io).
-# Manual (workflow_dispatch) — la identidad la prueba el OIDC del propio repo:
-# el runner emite un id-token que certifica "esto corre en Maarmapa/storefront-mcp",
-# y con eso el registro valida el namespace io.github.maarmapa. Sin secretos.
+# Publishes server.json to the official MCP Registry
+# (registry.modelcontextprotocol.io).
+#
+# Manual (workflow_dispatch). Identity is proved by the repo's own OIDC token:
+# the runner mints an id-token certifying "this runs in Maarmapa/storefront-mcp",
+# and the registry validates the io.github.Maarmapa namespace from it. No secrets.
+#
+# ORDER MATTERS, and getting it wrong leaves a live registry entry pointing at
+# nothing: the registry validates the `mcpName` field inside the published npm
+# TARBALL, so the npm version named in server.json has to exist on npm BEFORE
+# this workflow runs. The guard below refuses rather than registering a version
+# that was never published.
 name: Publish to MCP Registry
 on:
   workflow_dispatch:
 
 permissions:
-  id-token: write   # OIDC token para mcp-publisher
+  id-token: write   # OIDC token for mcp-publisher
   contents: read
 
 jobs:
@@ -15,10 +23,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify versions agree and the npm package exists
+        run: |
+          set -euo pipefail
+          NAME=$(node -p "require('./server.json').packages[0].identifier")
+          VERSION=$(node -p "require('./server.json').packages[0].version")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          SRV_VERSION=$(node -p "require('./server.json').version")
+          echo "server.json points at $NAME@$VERSION"
+
+          if [ "$PKG_VERSION" != "$VERSION" ] || [ "$SRV_VERSION" != "$VERSION" ]; then
+            echo "::error::version mismatch — package.json=$PKG_VERSION, server.json=$SRV_VERSION, package entry=$VERSION. Bump all three together (and SERVER_VERSION in src/lib/protocol.ts)."
+            exit 1
+          fi
+
+          if ! npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "::error::$NAME@$VERSION is not on npm. Publish to npm FIRST — the registry validates the mcpName inside the npm tarball, so registering now would create an entry pointing at a version that does not exist."
+            exit 1
+          fi
+          echo "$NAME@$VERSION is published. Proceeding."
+
       - name: Install mcp-publisher
         run: |
           curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/').tar.gz" | tar xz mcp-publisher
+
       - name: Login (GitHub OIDC)
         run: ./mcp-publisher login github-oidc
+
       - name: Publish
         run: ./mcp-publisher publish

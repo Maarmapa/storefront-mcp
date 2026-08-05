@@ -2,7 +2,9 @@
   "store": {
     "name": "Demo Art Supply",
     "currency": "USD",
-    "domain": "example.com"
+    "domain": "example.com",
+    "free_shipping_over": 50,
+    "flat_shipping": 3.9
   },
   "products": [
     {
@@ -12,7 +14,7 @@
       "category": "markers",
       "price": 4.5,
       "availability": "in_stock",
-      "description": "Dual-tip alcohol marker. Sold per color — see the Chromaflow Classic color card for available shades.",
+      "description": "Dual-tip alcohol marker. Sold per color — see the Chromaflow Classic variant chart for available shades.",
       "image": null
     },
     {
@@ -32,7 +34,7 @@
       "category": "leather",
       "price": 6.9,
       "availability": "in_stock",
-      "description": "Penetrating dye for natural, unfinished leather. Sold per shade — see the Tintoria Standard color card.",
+      "description": "Penetrating dye for natural, unfinished leather. Sold per shade — see the Tintoria Standard variant chart.",
       "image": null
     },
     {
@@ -64,21 +66,55 @@
       "availability": "in_stock",
       "description": "A5 sketchbook, 60 sheets of 180gsm marker-friendly paper.",
       "image": null
+    },
+    {
+      "slug": "fieldbook-sketch-a4",
+      "sku": "FB-A4",
+      "name": "Fieldbook Sketch A4 180gsm",
+      "brand": "Fieldbook",
+      "category": "paper",
+      "price": 11.0,
+      "availability": "in_stock",
+      "description": "A4 sketchbook, 60 sheets of 180gsm marker-friendly paper. Deliberately the ordinary case: ONE product with BOTH a page (slug) and a SKU over ONE pile of units, which is what most products in most stores look like.",
+      "image": null
     }
   ],
-  "colorCards": [
+  "inventory": {
+    "$comment": "DELIBERATELY A SEPARATE SECTION. In a real store this table lives in another system entirely (ERP, POS, a stock snapshot), not in the CMS that owns `products` above — and that split is the whole point: `availability` up there answers 'is this published and purchasable?', these numbers answer 'how many units exist?'. The demo data is arranged so every state shows up: (1) fieldbook-sketch-a5 is published as in_stock with ZERO units, the exact shape of an oversell; (2) CF-G09 is a catalogued variant with no inventory row, so it resolves to units:null = NOT VERIFIABLE, which blocks a write just like zero does; (3) roundhouse-detail-brush-set is out_of_stock in the catalog AND missing here, the only case where an unverifiable line may still raise a back-in-stock alert (the catalog confirms it independently); (4) fieldbook-sketch-a4 has 60 units under its SLUG and no row of its own under its SKU 'FB-A4', because the slug and the SKU are one pile — ordering 50 by slug and 50 by sku has to add up to 100 against 60, not fit twice; (5) everything else is a plain verified count.",
+    "by_sku": {
+      "CF-W00": 14,
+      "CF-W3": 6,
+      "CF-R21": 0,
+      "CF-B05": 9,
+      "CF-Y13": 3,
+      "TN-101": 22,
+      "TN-104": 11,
+      "TN-112": 0,
+      "TN-120": 7
+    },
+    "by_slug": {
+      "chromaflow-classic-marker": 45,
+      "chromaflow-classic-set-12": 4,
+      "tintoria-leather-dye-1oz": 40,
+      "tintoria-matte-finisher-4oz": 12,
+      "fieldbook-sketch-a5": 0,
+      "fieldbook-sketch-a4": 60
+    }
+  },
+  "variantCharts": [
     {
       "slug": "chromaflow-classic",
       "brand_name": "Chromaflow",
       "product_name": "Classic Marker",
       "base_price": 4.5,
-      "colors": [
-        { "code": "W00", "name": "Warm Gray 00", "sku": "CF-W00", "hex": "#EDEAE4", "stock": 14 },
-        { "code": "W3", "name": "Warm Gray 3", "sku": "CF-W3", "hex": "#C9C2B6", "stock": 6 },
-        { "code": "R21", "name": "Poppy Red", "sku": "CF-R21", "hex": "#D8402F", "stock": 0 },
-        { "code": "B05", "name": "Cerulean", "sku": "CF-B05", "hex": "#2E7DB3", "stock": 9 },
-        { "code": "Y13", "name": "Naples Yellow", "sku": "CF-Y13", "hex": "#EFCB58", "stock": 3 },
-        { "code": "G09", "name": "Leaf Green", "sku": "CF-G09", "hex": "#4E9A51", "stock": null }
+      "axis": "color",
+      "variants": [
+        { "code": "W00", "name": "Warm Gray 00", "sku": "CF-W00", "swatch_hex": "#EDEAE4" },
+        { "code": "W3", "name": "Warm Gray 3", "sku": "CF-W3", "swatch_hex": "#C9C2B6" },
+        { "code": "R21", "name": "Poppy Red", "sku": "CF-R21", "swatch_hex": "#D8402F" },
+        { "code": "B05", "name": "Cerulean", "sku": "CF-B05", "swatch_hex": "#2E7DB3" },
+        { "code": "Y13", "name": "Naples Yellow", "sku": "CF-Y13", "swatch_hex": "#EFCB58" },
+        { "code": "G09", "name": "Leaf Green", "sku": "CF-G09", "swatch_hex": "#4E9A51" }
       ]
     },
     {
@@ -86,11 +122,12 @@
       "brand_name": "Tintoria",
       "product_name": "Standard Leather Dye 1oz",
       "base_price": 6.9,
-      "colors": [
-        { "code": "101", "name": "Jet Black", "sku": "TN-101", "hex": "#141414", "stock": 22 },
-        { "code": "104", "name": "Rich Brown", "sku": "TN-104", "hex": "#5B3A24", "stock": 11 },
-        { "code": "112", "name": "Oxblood", "sku": "TN-112", "hex": "#5E2129", "stock": 0 },
-        { "code": "120", "name": "Navy", "sku": "TN-120", "hex": "#1E2A4A", "stock": 7 }
+      "axis": "color",
+      "variants": [
+        { "code": "101", "name": "Jet Black", "sku": "TN-101", "swatch_hex": "#141414" },
+        { "code": "104", "name": "Rich Brown", "sku": "TN-104", "swatch_hex": "#5B3A24" },
+        { "code": "112", "name": "Oxblood", "sku": "TN-112", "swatch_hex": "#5E2129" },
+        { "code": "120", "name": "Navy", "sku": "TN-120", "swatch_hex": "#1E2A4A" }
       ]
     }
   ],

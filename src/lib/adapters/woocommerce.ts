@@ -7,17 +7,36 @@
 // revenue data require the authenticated WC REST API (consumer key/secret)
 // and you should think twice before wiring that in at all.
 //
+// It also does NOT implement InventoryAdapter, CheckoutAdapter or
+// NotifyAdapter, and that is a decision rather than an omission. Consequence,
+// by design: with CATALOG_ADAPTER=woocommerce the write tools are never
+// announced. An agent talking to this adapter cannot create an order, because
+// nothing here can answer "how many units are there" — and a checkout tool
+// without an inventory source is an oversell tool with extra steps.
+//
+// THE SAME RULE APPLIES TO READ TOOLS, and it did not used to. This file once
+// carried three stubs — `listBrands` returning `[]`, `getColorCard` returning
+// `null`, `getQuote` rejecting every line — because the CatalogAdapter
+// interface demanded six methods. The effect was that a WooCommerce
+// deployment announced three tools to every anonymous agent that could never
+// answer anything: a chart list that is always empty, a chart lookup that
+// always says "not found", a quote that always rejects. "A tool that cannot be
+// honest is not announced" has to cover those too, so the interface now
+// requires two methods and the stubs are gone. What this adapter announces is
+// exactly what it can do: search_products, get_product, get_promotions.
+//
+// The TODO blocks at the bottom of this file describe what each unimplemented
+// contract needs from a WooCommerce install. They are intentionally not
+// half-implemented: guessing at somebody else's stock semantics is precisely
+// the failure this template is about.
+//
 // Env vars:
 //   WOO_BASE_URL   e.g. https://shop.example.com  (no trailing slash)
-//   STORE_CURRENCY e.g. USD | EUR | CLP           (default USD)
+//   STORE_CURRENCY e.g. USD | EUR                 (default USD)
 
 import type {
-  BrandSummary,
   CatalogAdapter,
-  ColorCard,
   Product,
-  Quote,
-  QuoteItem,
   SearchHit,
   SearchResult,
 } from '../adapter';
@@ -108,24 +127,6 @@ export class WooCommerceCatalogAdapter implements CatalogAdapter {
     };
   }
 
-  async listBrands(): Promise<BrandSummary[]> {
-    // TODO: WooCommerce has no native "color card" concept. Options:
-    //  a) map product attribute taxonomies (pa_color) per brand into charts,
-    //  b) keep a static JSON in your repo mapping brand → variants (what the
-    //     original implementation behind this template does),
-    //  c) return [] and drop get_color_card/list_brands from TOOLS.
-    return [];
-  }
-
-  async getColorCard(_brand: string): Promise<ColorCard | null> {
-    // TODO: resolve the chart (see listBrands) and, if you track per-variant
-    // stock somewhere (ERP, POS, a stock snapshot table), join it here.
-    // Contract reminder: when the stock source cannot be reached, return the
-    // chart with stock_verified:false and stock:null on every color — never
-    // invent availability for a variant you did not verify.
-    return null;
-  }
-
   async getPromotions(limit: number, brand?: string): Promise<{ total: number; promotions: SearchHit[] }> {
     const items = await wooFetch<WooStoreProduct[]>(`/products?on_sale=true&per_page=${limit}`);
     let promos = items;
@@ -135,27 +136,118 @@ export class WooCommerceCatalogAdapter implements CatalogAdapter {
     }
     return { total: promos.length, promotions: promos.map(toHit) };
   }
-
-  async getQuote(items: QuoteItem[], _ref?: string): Promise<Quote> {
-    // TODO: three viable strategies, in increasing order of effort:
-    //  1) Resolve each slug via getProduct(), sum prices, and return your
-    //     cart URL as payment_link (e.g. `${BASE}/cart/?add-to-cart=<id>`).
-    //  2) Use the Store API cart endpoints (POST /cart/add-item) with a
-    //     Cart-Token to build a real cart server-side.
-    //  3) Call your own checkout/quote endpoint if you already have one.
-    // Keep the invariant: this tool NEVER charges. It quotes and returns a
-    // link for the human to pay.
-    const rejected = items.map(it => ({
-      slug: it.slug,
-      sku: it.sku,
-      reason: 'get_quote not implemented for the WooCommerce adapter yet',
-    }));
-    return {
-      items: [],
-      rejected,
-      subtotal: 0,
-      currency: CURRENCY,
-      note: 'TODO: implement getQuote (see comments in woocommerce.ts).',
-    };
-  }
 }
+
+// ───────────────────── TODO: the contracts left open ─────────────────────
+//
+// Nothing below is implemented. Each block says what the contract needs and
+// which WooCommerce-specific decision only you can make. Implement one, export
+// it, and register it in src/lib/adapters/index.ts — the matching tool starts
+// being announced the moment the capability exists. Until then the tool does
+// not exist, which is the honest answer and costs you nothing.
+//
+// ── CatalogAdapter.getQuote (enables `get_quote`) ──
+//
+// Three viable strategies, in increasing order of effort:
+//   1) Resolve each slug via getProduct(), sum prices, and return your cart
+//      URL as payment_link (e.g. `${BASE}/cart/?add-to-cart=<id>`).
+//   2) Use the Store API cart endpoints (POST /cart/add-item) with a
+//      Cart-Token to build a real cart server-side.
+//   3) Call your own checkout/quote endpoint if you already have one.
+// Keep three invariants: this tool NEVER charges; echo the slug/sku you were
+// given on every priced line; and price the quantity you were ASKED for or
+// reject the line — create_checkout compares the two and refuses the cart when
+// they differ, because that gap is how an order for 40 units gets charged as
+// 10. Put tax and shipping in `charges`, not in the line prices.
+//
+// ── CatalogAdapter.listVariantCharts + getVariantChart ──
+//
+// Announced together, or not at all. WooCommerce has no native "variant chart"
+// concept, so this is a modelling decision:
+//   a) map product attribute taxonomies (pa_color, pa_size...) per product
+//      line into charts,
+//   b) keep a static JSON in your repo mapping a line → its variants,
+//   c) do not implement them, which is a perfectly good answer for a catalog
+//      that does not vary on a single axis.
+// If you do implement them and you track per-variant stock somewhere (ERP,
+// POS, a stock snapshot table), join it in getVariantChart. Contract reminder:
+// when the stock source cannot be reached, return the chart with
+// stock_verified:false and stock:null on every variant — never invent
+// availability for a variant you did not verify.
+//
+// ── InventoryAdapter (implement this FIRST; create_checkout requires it) ──
+//
+// Needs: units sellable RIGHT NOW per slug/sku, plus an honest "I don't know".
+//
+//   - `is_in_stock` from the Store API is a BOOLEAN, not a count. It cannot
+//     satisfy this contract on its own: it answers "purchasable?", and this
+//     contract answers "how many?". Do not map true → some large number.
+//   - `stock_quantity` exists on the authenticated WC REST API
+//     (/wp-json/wc/v3/products), but only when "Manage stock" is enabled on
+//     that product or variation. When stock management is OFF, the correct
+//     answer is `{units: null, verified: false, reason: 'stock management is
+//     disabled for this product'}` — NOT a number you inferred.
+//   - Variations live at /products/<id>/variations and have their own
+//     stock_quantity; a parent-level number is meaningless for a variant SKU.
+//   - Whatever source you pick, SUBTRACT what is already committed elsewhere
+//     (unpaid orders on hold, picking lists, another sales channel). "On the
+//     shelf" is not "sellable to this customer", and the gap between the two
+//     is where overselling lives.
+//   - It is fine to throw on a backend failure: resolveAvailability() turns a
+//     throw into every line being unverifiable, which blocks writes. Returning
+//     zeros or optimistic guesses is the only wrong answer.
+//   - Return `pool` on every row: the identity of the pile of units the line
+//     draws from. A simple WooCommerce product is one product id with a page
+//     AND a SKU over ONE stock row, so both spellings must return the same
+//     pool (e.g. `wc:product:1234`) and a variation returns its variation id.
+//     Without it, a cart with the slug on one line and the SKU on another is
+//     checked twice against the same units and passes twice.
+//   - `reserve` / `release` are optional in TypeScript and NOT optional in
+//     practice: without them live checkout refuses (see CHECKOUT_UNRESERVED).
+//     In WooCommerce, "Hold stock (minutes)" only applies to unpaid orders
+//     with stock management on, and it is applied by the order flow rather
+//     than exposed as an API — so the usual implementation is your own holds
+//     table with a single conditional UPDATE, checked and decremented in one
+//     statement, plus a sweeper for expired holds.
+//
+// ── CheckoutAdapter ──
+//
+// Needs: persist an order from an ALREADY-VALIDATED draft and return a payment
+// link. Do not re-decide quantities or re-price: the protocol layer priced
+// every line from the catalog and verified every line against inventory.
+//
+//   - Option A: Store API cart endpoints (POST /cart/add-item with a
+//     Cart-Token, then hand the human /checkout). No admin credentials.
+//   - Option B: authenticated WC REST API POST /orders with status
+//     "pending"/"on-hold", then return the order's payment URL.
+//   - The draft carries `reservation_id` when the units were held. Attach it
+//     to the order so your release/expiry logic can find it.
+//   - Tax and shipping are YOURS. Put them in `charges` on the receipt and set
+//     `total` to what the customer will actually pay; the tool response shows
+//     the line subtotal and that total side by side, and an unexplained gap
+//     between them is a number an agent will read out loud to a person.
+//   - Emails: nothing in this template mails the operator. If you want an
+//     order notification, send it from HERE, to an address in your own env —
+//     never to `draft.customer_email`, which an agent typed.
+//
+// ── NotifyAdapter ──
+//
+// Needs: isSubscribed / sendOptInEmail / confirmSubscription, and you want
+// countOptInEmails.
+//
+//   - Store subscriptions in your own table with a UNIQUE index on
+//     (email, product_ref), and treat a unique-violation on insert as SUCCESS
+//     so confirmation stays idempotent.
+//   - `isSubscribed` must be allowed to throw rather than returning false on
+//     error: the caller fails closed and sends nothing, which is the point.
+//   - sendOptInEmail is the only message this flow may send to a
+//     caller-supplied address. wp_mail() will work; a real ESP is better,
+//     because you will want delivery logs the day someone asks why they got
+//     mail from your shop. Persist `recipient_key` with every send.
+//   - countOptInEmails is what makes "3 emails per hour per recipient" a real
+//     ceiling instead of a per-instance hope: one indexed COUNT over that
+//     table. Skip it and the tool says so in its own response.
+//   - Set STOCK_ALERT_CONFIRM_URL to the page that serves the confirmation
+//     (the bundled Next route, or `storefront-mcp --http`, which serves the
+//     same handlers) and keep the rule that page enforces: GET renders, POST
+//     writes.

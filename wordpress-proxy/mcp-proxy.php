@@ -6,9 +6,10 @@
  *              an upstream MCP server (e.g. the Next.js template in this repo
  *              deployed on Vercel). Lets agents connect to the domain your
  *              customers already know, while the server runs wherever you want.
- * Author:      storefront-mcp contributors
- * Version:     1.0.0
- * License:     MIT
+ * Author:      Mario Maldonado (maarmapa)
+ * Version:     2.0.0
+ * License:     Apache-2.0
+ * License URI: https://www.apache.org/licenses/LICENSE-2.0
  *
  * INSTALL: drop this file into wp-content/mu-plugins/ (create the directory
  * if it does not exist). Must-use plugins need no activation.
@@ -21,6 +22,15 @@
  * SECURITY NOTES:
  *   - The proxy forwards the Authorization header untouched, so the
  *     public/sensitive tool split is enforced by the upstream, not here.
+ *   - It forwards the real client IP in X-Storefront-Client-IP, OVERWRITING
+ *     any value the caller sent. Without this, every request reaches the
+ *     upstream wearing this server's address, so the upstream's "5 writes per
+ *     minute per caller" quota becomes 5 per minute for the entire store and
+ *     one looping agent locks every customer out of checkout. Set
+ *     TRUSTED_PROXY_HEADER=x-storefront-client-ip on the upstream to make it
+ *     trust this header — and only do that if the upstream cannot be reached
+ *     except through here, since anyone who can reach it directly can write
+ *     that header themselves.
  *   - Payloads are capped at 256 KB: an MCP conversation never needs more,
  *     and the cap keeps the endpoint useless as a relay for anything else.
  *   - On upstream failure the proxy answers with a JSON-RPC error object,
@@ -70,6 +80,33 @@ function storefront_mcp_maybe_handle() {
     storefront_mcp_json_rpc_error(-32600, 'Method not allowed: use POST for JSON-RPC, GET for the descriptor.', 405);
 }
 
+/**
+ * The client address to hand upstream.
+ *
+ * REMOTE_ADDR by default. If WordPress itself sits behind a CDN or load
+ * balancer, REMOTE_ADDR is that CDN and the real client is in a header — but
+ * only trust such a header when you know your own edge writes it, which is why
+ * this reads a constant you set rather than guessing at X-Forwarded-For.
+ * Define STOREFRONT_MCP_CLIENT_IP_HEADER (e.g. 'HTTP_CF_CONNECTING_IP') in
+ * wp-config.php when that applies.
+ */
+function storefront_mcp_client_ip() {
+    if (defined('STOREFRONT_MCP_CLIENT_IP_HEADER') && STOREFRONT_MCP_CLIENT_IP_HEADER) {
+        $raw = $_SERVER[STOREFRONT_MCP_CLIENT_IP_HEADER] ?? '';
+        if (is_string($raw) && $raw !== '') {
+            // A forwarding header can be a list; the LAST entry is the one the
+            // closest hop appended.
+            $parts = array_map('trim', explode(',', $raw));
+            $last = end($parts);
+            if (is_string($last) && $last !== '') {
+                return substr($last, 0, 64);
+            }
+        }
+    }
+    $remote = $_SERVER['REMOTE_ADDR'] ?? '';
+    return is_string($remote) ? substr($remote, 0, 64) : '';
+}
+
 function storefront_mcp_upstream_url() {
     if (defined('STOREFRONT_MCP_UPSTREAM') && STOREFRONT_MCP_UPSTREAM) {
         return STOREFRONT_MCP_UPSTREAM;
@@ -93,7 +130,7 @@ function storefront_mcp_handle_get() {
     $configured = storefront_mcp_upstream_url() !== null;
     wp_send_json(array(
         'name'        => 'storefront-mcp-proxy',
-        'version'     => '1.0.0',
+        'version'     => '2.0.0',
         'description' => 'MCP endpoint for this store. POST JSON-RPC 2.0 messages to use it.',
         'transport'   => 'streamable-http',
         'status'      => $configured ? 'ready' : 'upstream not configured',
@@ -120,6 +157,14 @@ function storefront_mcp_handle_post() {
     $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? ($_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '');
     if ($auth !== '') {
         $headers['Authorization'] = $auth;
+    }
+
+    // Who is really calling. REMOTE_ADDR is the TCP peer as this web server
+    // saw it, which is the one value in the request a caller cannot choose.
+    // It is SET, not appended, so nothing the caller sent survives into it.
+    $client_ip = storefront_mcp_client_ip();
+    if ($client_ip !== '') {
+        $headers['X-Storefront-Client-IP'] = $client_ip;
     }
 
     $response = wp_remote_post($upstream, array(
