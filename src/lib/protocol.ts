@@ -14,7 +14,7 @@ import { getAdapters } from './adapters';
 import { SENSITIVE_TOOLS, TOOLS } from './tools';
 
 export const PROTOCOL_VERSION = '2025-06-18';
-export const SERVER_VERSION = '1.0.0';
+export const SERVER_VERSION = '1.0.1';
 
 export function getServerName(): string {
   return process.env.MCP_SERVER_NAME || 'storefront-mcp';
