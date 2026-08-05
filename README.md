@@ -194,7 +194,7 @@ wordpress-proxy/mcp-proxy.php mu-plugin to serve MCP under your WP domain
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ---
 
@@ -310,4 +310,4 @@ genérica la tiene.
 
 ## Licencia
 
-MIT — ver [LICENSE](LICENSE).
+Apache-2.0 — ver [LICENSE](LICENSE) y [NOTICE](NOTICE).
