@@ -7,6 +7,15 @@
 //
 // It owns everything protocol-shaped; everything data-shaped lives behind the
 // adapter interfaces in src/lib/adapter.ts. Swap the adapter, keep the protocol.
+//
+// ONE LIST, TWO USES. `visibleTools()` decides what tools/list announces and
+// `callTool()` refuses anything that list would not contain. That is not
+// tidiness: when the two are computed separately they drift, and the drift is
+// visible from outside — a server that announces a tool and then answers it
+// with `{error: "not configured"}` while a different unannounced tool gets
+// -32601 is telling an agent two incompatible stories about the same
+// situation. Announcement and dispatch answer "does this tool exist here?"
+// exactly once, from the same function.
 
 import { timingSafeEqual } from 'node:crypto';
 import type { QuoteItem } from './adapter';
@@ -18,7 +27,14 @@ import {
   type CallContext,
 } from './commerce';
 import { ToolCallError } from './errors';
-import { SENSITIVE_TOOLS, TOOLS, writeToolDefs, type ToolDef } from './tools';
+import {
+  catalogToolDefs,
+  CORE_TOOLS,
+  OPS_TOOLS,
+  SENSITIVE_TOOLS,
+  writeToolDefs,
+  type ToolDef,
+} from './tools';
 import { checkoutMode, stockAlertMode } from './write-mode';
 
 export type { CallContext } from './commerce';
@@ -30,7 +46,7 @@ export const PROTOCOL_VERSION = '2025-06-18';
  * both `version` fields in server.json — clients see this one, npm sees the
  * second, and the MCP Registry sees the third. Bump the three together.
  */
-export const SERVER_VERSION = '1.1.0';
+export const SERVER_VERSION = '2.0.0';
 
 export function getServerName(): string {
   return process.env.MCP_SERVER_NAME || 'storefront-mcp';
@@ -77,11 +93,62 @@ export function isAuthorizedHeader(authorizationHeader: string | null | undefine
   return !!secret && safeEqual(authorizationHeader || '', `Bearer ${secret}`);
 }
 
+// ───────────────────────── capabilities → tools ─────────────────────────
+
+/**
+ * The tools that exist on this deployment at a given privilege level.
+ *
+ * Three filters, deliberately not conflated:
+ *
+ *   - CAPABILITY decides whether a tool exists at all. Every optional adapter
+ *     method is one: no `getQuote`, no `get_quote`; no OpsAdapter, no
+ *     back-office tools; no `CheckoutAdapter` + `InventoryAdapter` + pricing,
+ *     no `create_checkout`. An adapter that implements nothing optional keeps
+ *     working unchanged and its agents simply never see the rest.
+ *   - PRIVILEGE decides whether the sensitive tools are visible to THIS caller
+ *     (Bearer MCP_SECRET).
+ *   - The per-tool kill switch (mode "off") removes a write tool without
+ *     touching adapter code.
+ */
+export function visibleTools(authorized: boolean): ToolDef[] {
+  const { catalog, ops, inventory, checkout, notify } = getAdapters();
+
+  const read = catalogToolDefs({
+    promotions: typeof catalog.getPromotions === 'function',
+    quote: typeof catalog.getQuote === 'function',
+    // Both chart tools stand or fall together: listing charts you cannot open
+    // is as useless as opening charts nobody can find.
+    variantCharts:
+      typeof catalog.getVariantChart === 'function' && typeof catalog.listVariantCharts === 'function',
+  });
+
+  const write = writeToolDefs({
+    // create_checkout needs to price (catalog), to count (inventory) and to
+    // persist (checkout). Missing any one of the three and every call would
+    // end in a refusal.
+    checkout:
+      !!checkout && !!inventory && typeof catalog.getQuote === 'function' && checkoutMode() !== 'off',
+    stockAlert: !!notify && stockAlertMode() !== 'off',
+  });
+
+  const sensitive = ops && authorized ? OPS_TOOLS : [];
+
+  return [...CORE_TOOLS, ...read, ...write, ...sensitive];
+}
+
+/** Names of every tool this deployment can honor, ignoring privilege. */
+function existingToolNames(): Set<string> {
+  return new Set(visibleTools(true).map(t => t.name));
+}
+
 // ───────────────────────── tool dispatch ─────────────────────────
 
 export class UnknownToolError extends Error {
   constructor(public toolName: string) {
-    super(`Unknown tool: ${toolName}`);
+    super(
+      `Unknown tool: ${toolName}. Call tools/list — this deployment announces exactly the tools ` +
+        `it can answer.`,
+    );
   }
 }
 
@@ -91,6 +158,10 @@ export async function callTool(
   ctx: CallContext = DEFAULT_CONTEXT,
 ): Promise<unknown> {
   const { catalog, ops } = getAdapters();
+
+  // A tool that is not announced does not exist, and says so the same way for
+  // every reason it might not exist.
+  if (!existingToolNames().has(name)) throw new UnknownToolError(name);
 
   switch (name) {
     // ───────── write tools: public, but guarded (src/lib/commerce.ts) ─────────
@@ -109,92 +180,60 @@ export async function callTool(
       const p = await catalog.getProduct(slug);
       return p ?? { error: 'product not found', slug };
     }
-    case 'get_color_card': {
-      const brand = String(args.brand ?? '');
-      const card = await catalog.getColorCard(brand);
+    case 'get_variant_chart': {
+      const chart = String(args.chart ?? '');
+      const card = await catalog.getVariantChart!(chart);
       if (!card) {
-        const available = await catalog.listBrands();
-        return { error: 'brand not found', brand, available: available.map(b => b.slug) };
+        const available = await catalog.listVariantCharts!();
+        return { error: 'variant chart not found', chart, available: available.map(b => b.slug) };
       }
       return card;
     }
-    case 'list_brands':
-      return { brands: await catalog.listBrands() };
+    case 'list_variant_charts':
+      return { charts: await catalog.listVariantCharts!() };
     case 'get_promotions': {
       const limit = Math.min(Number(args.limit) || 50, 100);
       const brand = args.brand ? String(args.brand) : undefined;
-      return catalog.getPromotions(limit, brand);
+      return catalog.getPromotions!(limit, brand);
     }
     case 'get_quote': {
       const items = Array.isArray(args.items) ? (args.items as QuoteItem[]) : [];
       if (items.length === 0) return { error: 'items required' };
       const ref = args.ref ? String(args.ref) : undefined;
-      return catalog.getQuote(items, ref);
+      return catalog.getQuote!(items, ref);
     }
 
-    // ───────── sensitive tools: auth already checked by the caller ─────────
+    // ───────── sensitive tools: auth already checked by the caller, and the
+    // ───────── ops adapter already proven to exist by the gate above ─────────
     case 'get_stock_bulk': {
-      if (!ops) return { error: 'ops adapter not configured on this deployment' };
       const skus = Array.isArray(args.skus) ? (args.skus as string[]).slice(0, 50) : [];
       if (skus.length === 0) return { error: 'skus required' };
-      return ops.getStockBulk(skus);
+      return ops!.getStockBulk(skus);
     }
     case 'get_top_products': {
-      if (!ops) return { error: 'ops adapter not configured on this deployment' };
       const days = Math.min(Number(args.days) || 30, 365);
       const limit = Math.min(Number(args.limit) || 10, 50);
-      return ops.getTopProducts(days, limit);
+      return ops!.getTopProducts(days, limit);
     }
     case 'get_recent_orders': {
-      if (!ops) return { error: 'ops adapter not configured on this deployment' };
       const limit = Math.min(Number(args.limit) || 20, 100);
       const status = args.status ? String(args.status) : undefined;
-      return ops.getRecentOrders(limit, status);
+      return ops!.getRecentOrders(limit, status);
     }
     case 'get_order_status': {
-      if (!ops) return { error: 'ops adapter not configured on this deployment' };
       const shortId = String(args.short_id ?? '').trim();
       if (!shortId) return { error: 'short_id required' };
-      const o = await ops.getOrderStatus(shortId);
+      const o = await ops!.getOrderStatus(shortId);
       return o ? { found: true, ...o } : { found: false, short_id: shortId };
     }
     case 'get_sales_summary': {
-      if (!ops) return { error: 'ops adapter not configured on this deployment' };
       const days = Math.min(Number(args.days) || 30, 365);
-      return ops.getSalesSummary(days);
+      return ops!.getSalesSummary(days);
     }
 
     default:
       throw new UnknownToolError(name);
   }
-}
-
-/**
- * The tools visible to a caller at a given privilege level AND on this
- * deployment.
- *
- * Two different filters, deliberately not conflated:
- *
- *   - PRIVILEGE decides whether the sensitive back-office tools appear
- *     (Bearer MCP_SECRET).
- *   - CAPABILITY decides whether the write tools exist at all. They are
- *     announced only when the adapters that make them honest are present, so
- *     an adapter that implements nothing new keeps working unchanged and its
- *     agents never see a checkout tool that could not verify a single unit.
- *     `create_checkout` additionally requires an InventoryAdapter: without one
- *     the fail-closed rule would block every call, and a tool that can never
- *     succeed is worse than a tool that is not there.
- *   - The per-tool kill switch (mode "off") removes a write tool without
- *     touching adapter code.
- */
-export function visibleTools(authorized: boolean): ToolDef[] {
-  const { inventory, checkout, notify } = getAdapters();
-  const base = authorized ? TOOLS : TOOLS.filter(t => !SENSITIVE_TOOLS.has(t.name));
-  const write = writeToolDefs({
-    checkout: !!checkout && !!inventory && checkoutMode() !== 'off',
-    stockAlert: !!notify && stockAlertMode() !== 'off',
-  });
-  return [...base, ...write];
 }
 
 // ───────────────────────── JSON-RPC handler ─────────────────────────
@@ -257,14 +296,16 @@ export async function handleRequest(
 
 /** GET discovery descriptor shared by the Next route and the CLI HTTP mode. */
 export function discoveryDescriptor(transport: 'streamable-http' | 'http') {
-  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || 'https://example.com').replace(/\/$/, '');
+  // No placeholder domain: a descriptor that points every unconfigured
+  // deployment at the same example URL is worse than one field short.
+  const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || '').trim().replace(/\/$/, '');
   return {
     name: getServerName(),
     version: SERVER_VERSION,
     description: getServerDescription(),
     protocolVersion: PROTOCOL_VERSION,
     transport,
-    docs: `${siteUrl}/llms.txt`,
+    ...(siteUrl ? { docs: `${siteUrl}/llms.txt` } : {}),
     tools: visibleTools(false).map(t => t.name),
   };
 }

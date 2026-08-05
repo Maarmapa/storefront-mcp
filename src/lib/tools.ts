@@ -10,6 +10,12 @@
 // tool to find out whether it does anything) and the true shape of the rate
 // limit. A limit described as per-tool when it is shared is paid for in
 // retries, not in confusion.
+//
+// NOTHING HERE IS A FIXED LIST. Every definition is produced from what the
+// active adapter can actually do, because "a tool that cannot be honest is not
+// announced" has to apply to the read tools too. A `list_variant_charts` that
+// returns `[]` on every call because the adapter has a stub is not a working
+// tool; it is a dead end an agent will walk into, twice.
 
 import { checkoutMode, modeBanner, stockAlertMode } from './write-mode';
 
@@ -23,13 +29,18 @@ export interface ToolDef {
   };
 }
 
-export const TOOLS: ToolDef[] = [
+/**
+ * The two tools every catalog can answer. They correspond to the two required
+ * methods of CatalogAdapter.
+ */
+export const CORE_TOOLS: ToolDef[] = [
   {
     name: 'search_products',
     description:
       'Search purchasable products in the catalog by name, brand or SKU. Returns slug, name, ' +
-      'brand, price and product URL for each hit. If the query looks like a color/variant code ' +
-      '(e.g. "E00", "101"), prefer get_color_card: a code is a variant of a chart, not a product.',
+      'brand, price and product URL for each hit. If the query looks like a variant code ' +
+      '(e.g. "E00", "101"), prefer get_variant_chart when this server offers it: a code is a ' +
+      'variant of a chart, not a product.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -52,62 +63,107 @@ export const TOOLS: ToolDef[] = [
       required: ['slug'],
     },
   },
-  {
-    name: 'get_color_card',
-    description:
-      'Return a brand variant chart (color card): every variant with code, name, SKU and — when ' +
-      'the stock backend answers — real per-variant availability. stock:null means unknown, ' +
-      'never assume it is available.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        brand: { type: 'string', description: 'Chart slug or plain brand name, e.g. "chromaflow-classic" or "chromaflow"' },
-      },
-      required: ['brand'],
-    },
-  },
-  {
-    name: 'list_brands',
-    description: 'List available variant charts (slug, brand, product line, number of variants, base price).',
-    inputSchema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'get_promotions',
-    description: 'List products currently on sale. Returns up to 100.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        limit: { type: 'number', description: 'Max results (default 50, max 100)' },
-        brand: { type: 'string', description: 'Optional brand filter' },
-      },
-    },
-  },
-  {
-    name: 'get_quote',
-    description:
-      'Build a quote for a list of items and return the total plus a payment_link to hand to ' +
-      'the human. It never charges anything: quote only, the human pays through the normal checkout.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        items: {
-          type: 'array',
-          description: 'Items to quote: each with slug (a product) or sku (a specific variant), plus qty.',
-          items: {
-            type: 'object',
-            properties: {
-              slug: { type: 'string' },
-              sku: { type: 'string' },
-              qty: { type: 'number' },
+];
+
+/** Which optional catalog capabilities this deployment has. */
+export interface CatalogCapabilities {
+  promotions: boolean;
+  quote: boolean;
+  variantCharts: boolean;
+}
+
+/** The optional read tools, announced only when the adapter implements them. */
+export function catalogToolDefs(caps: CatalogCapabilities): ToolDef[] {
+  const defs: ToolDef[] = [];
+
+  if (caps.variantCharts) {
+    defs.push(
+      {
+        name: 'get_variant_chart',
+        description:
+          'Return one product line\'s full variant chart: every variant with its code, name, SKU ' +
+          'and — when the stock backend answers — real per-variant availability. The chart axis ' +
+          'is whatever this catalog varies on (color, size, grit...). stock:null means unknown, ' +
+          'never assume it is available.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            chart: {
+              type: 'string',
+              description: 'Chart slug or plain brand name, e.g. "chromaflow-classic" or "chromaflow"',
             },
           },
+          required: ['chart'],
         },
-        ref: { type: 'string', description: 'Optional referral key for conversion tracking' },
       },
-      required: ['items'],
-    },
-  },
-  // ───────── sensitive tools (Bearer MCP_SECRET required) ─────────
+      {
+        name: 'list_variant_charts',
+        description:
+          'List the variant charts this store publishes (slug, brand, product line, number of ' +
+          'variants, base price). Use it to discover what get_variant_chart accepts.',
+        inputSchema: { type: 'object', properties: {} },
+      },
+    );
+  }
+
+  if (caps.promotions) {
+    defs.push({
+      name: 'get_promotions',
+      description: 'List products currently on sale. Returns up to 100.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: { type: 'number', description: 'Max results (default 50, max 100)' },
+          brand: { type: 'string', description: 'Optional brand filter' },
+        },
+      },
+    });
+  }
+
+  if (caps.quote) {
+    defs.push({
+      name: 'get_quote',
+      description:
+        'Build a quote for a list of items and return the total plus a payment_link to hand to ' +
+        'the human. It never charges anything: quote only, the human pays through the normal ' +
+        'checkout. Quantities it cannot price in full come back in `rejected` with a reason — it ' +
+        'does not quietly quote a smaller quantity than you asked for.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            description: 'Items to quote: each with slug (a product) or sku (a specific variant), plus qty.',
+            items: {
+              type: 'object',
+              properties: {
+                slug: { type: 'string' },
+                sku: { type: 'string' },
+                qty: { type: 'number' },
+              },
+            },
+          },
+          ref: { type: 'string', description: 'Optional referral key for conversion tracking' },
+        },
+        required: ['items'],
+      },
+    });
+  }
+
+  return defs;
+}
+
+// ───────────────────── sensitive tools (Bearer MCP_SECRET) ─────────────────────
+
+/**
+ * The back-office tools. Announced only when an OpsAdapter exists AND the
+ * caller is authorized — the token gates who may see them, the adapter gates
+ * whether they exist. A deployment with no OpsAdapter used to announce all
+ * five to any authorized caller and then answer every one of them with
+ * `{error: 'ops adapter not configured'}`, which is the same dead end the
+ * capability gating on the write tools was built to avoid.
+ */
+export const OPS_TOOLS: ToolDef[] = [
   {
     name: 'get_stock_bulk',
     description: 'Real-time stock for multiple SKUs in one call. Ideal to verify availability before quoting.',
@@ -181,9 +237,19 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   'subscribe_stock_alert',
 ]);
 
+/**
+ * One sentence, two cases, both true. Which one applies to a given request
+ * depends on whether the deployment can attribute callers (see
+ * src/lib/client-ip.ts), so the description names both and the -32005 error
+ * says which one just fired. Describing only the flattering case is how an
+ * agent learns a retry strategy that does not match the server.
+ */
 const SHARED_QUOTA_NOTE =
-  'Rate limit: 5 calls/minute per caller, SHARED with the other write tool (create_checkout and ' +
-  'subscribe_stock_alert draw from one bucket, it does not reset by alternating them).';
+  'Rate limit: 5 calls/minute per caller where this deployment can identify callers (a trusted ' +
+  'proxy header or a direct connection); where it cannot, a single ceiling of 60 calls/minute ' +
+  'for the whole server instance applies instead. Either way the bucket is SHARED with the other ' +
+  'write tool — create_checkout and subscribe_stock_alert draw from one counter, and it does not ' +
+  'reset by alternating them.';
 
 export interface WriteCapabilities {
   checkout: boolean;
@@ -202,13 +268,17 @@ export function writeToolDefs(caps: WriteCapabilities): ToolDef[] {
         'This server never charges anyone. ' +
         modeBanner(checkoutMode(), 'create a real order') +
         ' Prices are NOT accepted from you: every unit price and total is computed server-side ' +
-        'from the catalog on this request. Duplicate lines for the same product are merged before ' +
-        'any limit or stock check, so send them however you like. A qty that is not an integer ' +
-        'greater than 0 is rejected, never rounded or defaulted. Availability is verified against ' +
-        'the inventory system line by line and the order is created ONLY if every line has enough ' +
-        'verified units: if stock is short OR cannot be verified, nothing is created. The response ' +
-        'always reports stock_available and stock_verified per line — use those numbers to adjust ' +
-        'quantities and retry, do not guess. ' +
+        'from the catalog on this request, and a quote that prices a different quantity than the ' +
+        'one requested blocks the order instead of becoming it. Lines for the same product are ' +
+        'merged before any limit or stock check — including lines written as a slug and lines ' +
+        'written as a sku when they are the same stock — so send them however you like. A qty ' +
+        'that is not an integer greater than 0 is rejected, never rounded or defaulted. ' +
+        'Availability is verified against the inventory system and the order is created ONLY if ' +
+        'every line has enough verified units: if stock is short OR cannot be verified, nothing ' +
+        'is created. The response always reports stock_available and stock_verified per line — ' +
+        'use those numbers to adjust quantities and retry, do not guess. When the total to pay ' +
+        'differs from the line subtotal (tax, shipping, a discount), quote amount_to_pay to the ' +
+        'customer. ' +
         SHARED_QUOTA_NOTE,
       inputSchema: {
         type: 'object',
@@ -250,9 +320,12 @@ export function writeToolDefs(caps: WriteCapabilities): ToolDef[] {
         'address given, and the subscription exists only after the human confirms it, so tell the ' +
         'customer to check their inbox rather than telling them they are subscribed. It refuses ' +
         'when the product is actually in stock (buy it instead), when availability cannot be ' +
-        'confirmed as unavailable, when that address is already subscribed to that product, and ' +
-        'when the address has already received 3 confirmation emails in the last hour — that last ' +
-        'quota is per RECIPIENT and does not reset by changing caller. ' +
+        'confirmed as unavailable, when that address is already subscribed to that product, when a ' +
+        'confirmation for it was already sent to that mailbox and nobody has acted on it, and when ' +
+        'the mailbox has already received 3 confirmation emails in the last hour — that last quota ' +
+        'is per RECIPIENT MAILBOX (plus-tags and dots do not create a new allowance) and does not ' +
+        'reset by changing caller. The response field quota_enforcement says whether that ceiling ' +
+        'is durable on this deployment or best-effort in memory. ' +
         SHARED_QUOTA_NOTE,
       inputSchema: {
         type: 'object',
@@ -285,10 +358,4 @@ export function writeToolDefs(caps: WriteCapabilities): ToolDef[] {
  * The catalog tools stay public on purpose: an agent may browse the shop
  * window; it never sees the operation.
  */
-export const SENSITIVE_TOOLS: ReadonlySet<string> = new Set([
-  'get_stock_bulk',
-  'get_top_products',
-  'get_recent_orders',
-  'get_order_status',
-  'get_sales_summary',
-]);
+export const SENSITIVE_TOOLS: ReadonlySet<string> = new Set(OPS_TOOLS.map(t => t.name));
