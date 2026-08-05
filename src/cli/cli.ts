@@ -30,6 +30,7 @@ import {
   McpError,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
+import { clientIpFromNodeHeaders } from '../lib/client-ip';
 import {
   callTool,
   discoveryDescriptor,
@@ -40,11 +41,13 @@ import {
   PROTOCOL_VERSION,
   rpcError,
   SERVER_VERSION,
+  ToolCallError,
   UnknownToolError,
   visibleTools,
   type JsonRpcRequest,
 } from '../lib/protocol';
 import { SENSITIVE_TOOLS } from '../lib/tools';
+import { checkoutMode, stockAlertMode } from '../lib/write-mode';
 
 const HELP = `storefront-mcp v${SERVER_VERSION} — e-commerce storefront MCP server
 
@@ -54,16 +57,47 @@ Usage:
   storefront-mcp --help | --version
 
 Environment:
-  CATALOG_ADAPTER   "memory" (default: toy catalog + fake back office) | "woocommerce"
+  CATALOG_ADAPTER   "memory" (default: toy catalog + fake back office, inventory,
+                    checkout and alerts) | "woocommerce" (catalog only)
   MCP_SECRET        unlocks the 5 sensitive back-office tools.
                     stdio: presence of the variable unlocks them (no header exists).
                     HTTP:  callers must send "Authorization: Bearer <MCP_SECRET>".
   MCP_SERVER_NAME / MCP_SERVER_DESCRIPTION   override the advertised identity.
+
+Write tools (public but guarded — both DRY unless turned on by name):
+  CHECKOUT_MODE     off | dry (default) | live   create_checkout
+  STOCK_ALERT_MODE  off | dry (default) | live   subscribe_stock_alert
+  STOCK_ALERT_SIGNING_SECRET   HMAC key for double opt-in links. Without it no
+                    confirmation link can be issued and the alert tool refuses
+                    (it never subscribes anyone without confirmation).
+  STOCK_ALERT_CONFIRM_URL      where the confirmation page lives.
+  A write tool is only announced when the active adapter can honor it.
 `;
 
 // stdout is the protocol channel in stdio mode — humans get stderr.
 function log(msg: string): void {
   process.stderr.write(`[storefront-mcp] ${msg}\n`);
+}
+
+/**
+ * Say out loud, at startup, whether the write tools exist and whether they do
+ * anything. An operator should never have to call a tool to find out if it is
+ * armed.
+ */
+function writeToolStatus(tools: Array<{ name: string }>): string {
+  const has = (n: string) => tools.some(t => t.name === n);
+  const parts: string[] = [];
+  parts.push(
+    has('create_checkout')
+      ? `create_checkout=${checkoutMode()}`
+      : 'create_checkout=absent (needs checkout+inventory adapters)',
+  );
+  parts.push(
+    has('subscribe_stock_alert')
+      ? `subscribe_stock_alert=${stockAlertMode()}`
+      : 'subscribe_stock_alert=absent (needs notify adapter)',
+  );
+  return parts.join(', ');
 }
 
 // ───────────────────────── stdio mode (default) ─────────────────────────
@@ -89,18 +123,24 @@ async function runStdio(): Promise<void> {
       throw new McpError(-32001, `Tool '${name}' requires authentication (set MCP_SECRET in the env)`);
     }
     try {
-      const result = await callTool(name, (req.params.arguments ?? {}) as Record<string, unknown>);
+      // One local process on one machine: every stdio call shares a quota key.
+      const result = await callTool(name, (req.params.arguments ?? {}) as Record<string, unknown>, {
+        clientKey: 'stdio',
+      });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
       if (e instanceof UnknownToolError) throw new McpError(ErrorCode.MethodNotFound, e.message);
+      if (e instanceof ToolCallError) throw new McpError(e.code, e.message);
       throw new McpError(ErrorCode.InternalError, `Tool error: ${(e as Error).message}`);
     }
   });
 
   await server.connect(new StdioServerTransport());
+  const tools = visibleTools(authorized);
   log(
     `stdio ready — adapter=${process.env.CATALOG_ADAPTER || 'memory'}, ` +
-      `tools=${visibleTools(authorized).length}/11 (sensitive ${authorized ? 'unlocked via MCP_SECRET' : 'hidden: MCP_SECRET not set'})`,
+      `tools=${tools.length} (sensitive ${authorized ? 'unlocked via MCP_SECRET' : 'hidden: MCP_SECRET not set'}` +
+      `; write tools: ${writeToolStatus(tools)})`,
   );
 }
 
@@ -153,15 +193,18 @@ function runHttp(port: number): void {
     // Real Bearer auth here — HTTP callers are untrusted, exactly like the
     // Next.js route.
     const authorized = isAuthorizedHeader(req.headers.authorization);
+    // Same resolver as the Next.js route: platform headers first, otherwise
+    // the LAST x-forwarded-for hop.
+    const ctx = { clientKey: clientIpFromNodeHeaders(req.headers) };
 
     if (Array.isArray(body)) {
       const responses = (
-        await Promise.all(body.map(b => handleRequest(b, authorized)))
+        await Promise.all(body.map(b => handleRequest(b, authorized, ctx)))
       ).filter(r => r !== null);
       sendJson(200, responses);
       return;
     }
-    const result = await handleRequest(body, authorized);
+    const result = await handleRequest(body, authorized, ctx);
     if (result === null) {
       res.writeHead(202);
       res.end();

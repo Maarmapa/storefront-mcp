@@ -14,6 +14,7 @@
 // protocol.
 
 import { NextRequest, NextResponse } from 'next/server';
+import { clientIpFromHeaders } from '@/lib/client-ip';
 import {
   discoveryDescriptor,
   handleRequest,
@@ -46,13 +47,19 @@ export async function POST(req: NextRequest) {
   // there is no "no secret configured, so everything is open" mode.
   const authorized = isAuthorizedHeader(req.headers.get('authorization'));
 
+  // Caller identity for the write-tool quota. Resolved by the shared module in
+  // src/lib/client-ip.ts so this route and the CLI cannot disagree about which
+  // header to trust — and it never reads the FIRST x-forwarded-for value,
+  // which the caller writes.
+  const ctx = { clientKey: clientIpFromHeaders(req.headers) };
+
   if (Array.isArray(body)) {
     const responses = (
-      await Promise.all(body.map(b => handleRequest(b, authorized)))
+      await Promise.all(body.map(b => handleRequest(b, authorized, ctx)))
     ).filter(r => r !== null);
     return NextResponse.json(responses);
   }
-  const result = await handleRequest(body, authorized);
+  const result = await handleRequest(body, authorized, ctx);
   if (result === null) return new Response(null, { status: 202 });
   return NextResponse.json(result);
 }

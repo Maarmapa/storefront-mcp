@@ -11,7 +11,18 @@
 import { timingSafeEqual } from 'node:crypto';
 import type { QuoteItem } from './adapter';
 import { getAdapters } from './adapters';
-import { SENSITIVE_TOOLS, TOOLS } from './tools';
+import {
+  createCheckoutTool,
+  DEFAULT_CONTEXT,
+  subscribeStockAlertTool,
+  type CallContext,
+} from './commerce';
+import { ToolCallError } from './errors';
+import { SENSITIVE_TOOLS, TOOLS, writeToolDefs, type ToolDef } from './tools';
+import { checkoutMode, stockAlertMode } from './write-mode';
+
+export type { CallContext } from './commerce';
+export { ToolCallError } from './errors';
 
 export const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_VERSION = '1.0.1';
@@ -69,10 +80,20 @@ export class UnknownToolError extends Error {
   }
 }
 
-export async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+export async function callTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: CallContext = DEFAULT_CONTEXT,
+): Promise<unknown> {
   const { catalog, ops } = getAdapters();
 
   switch (name) {
+    // ───────── write tools: public, but guarded (src/lib/commerce.ts) ─────────
+    case 'create_checkout':
+      return createCheckoutTool(args, ctx);
+    case 'subscribe_stock_alert':
+      return subscribeStockAlertTool(args, ctx);
+
     case 'search_products': {
       const query = String(args.query ?? '');
       const limit = Math.min(Number(args.limit) || 8, 25);
@@ -143,14 +164,41 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
   }
 }
 
-/** The tools visible to a caller at a given privilege level. */
-export function visibleTools(authorized: boolean) {
-  return authorized ? TOOLS : TOOLS.filter(t => !SENSITIVE_TOOLS.has(t.name));
+/**
+ * The tools visible to a caller at a given privilege level AND on this
+ * deployment.
+ *
+ * Two different filters, deliberately not conflated:
+ *
+ *   - PRIVILEGE decides whether the sensitive back-office tools appear
+ *     (Bearer MCP_SECRET).
+ *   - CAPABILITY decides whether the write tools exist at all. They are
+ *     announced only when the adapters that make them honest are present, so
+ *     an adapter that implements nothing new keeps working unchanged and its
+ *     agents never see a checkout tool that could not verify a single unit.
+ *     `create_checkout` additionally requires an InventoryAdapter: without one
+ *     the fail-closed rule would block every call, and a tool that can never
+ *     succeed is worse than a tool that is not there.
+ *   - The per-tool kill switch (mode "off") removes a write tool without
+ *     touching adapter code.
+ */
+export function visibleTools(authorized: boolean): ToolDef[] {
+  const { inventory, checkout, notify } = getAdapters();
+  const base = authorized ? TOOLS : TOOLS.filter(t => !SENSITIVE_TOOLS.has(t.name));
+  const write = writeToolDefs({
+    checkout: !!checkout && !!inventory && checkoutMode() !== 'off',
+    stockAlert: !!notify && stockAlertMode() !== 'off',
+  });
+  return [...base, ...write];
 }
 
 // ───────────────────────── JSON-RPC handler ─────────────────────────
 
-export async function handleRequest(req: JsonRpcRequest, authorized: boolean) {
+export async function handleRequest(
+  req: JsonRpcRequest,
+  authorized: boolean,
+  ctx: CallContext = DEFAULT_CONTEXT,
+) {
   switch (req.method) {
     case 'initialize':
       return rpcResult(req.id, {
@@ -181,12 +229,15 @@ export async function handleRequest(req: JsonRpcRequest, authorized: boolean) {
         return rpcError(req.id, -32001, `Tool '${name}' requires authentication (Bearer MCP_SECRET)`);
       }
       try {
-        const result = await callTool(name, params.arguments ?? {});
+        const result = await callTool(name, params.arguments ?? {}, ctx);
         return rpcResult(req.id, {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         });
       } catch (e) {
         if (e instanceof UnknownToolError) return rpcError(req.id, -32601, e.message);
+        // Quota and capability refusals carry their own code so an agent can
+        // tell "not acceptable, back off" from "here is a result you dislike".
+        if (e instanceof ToolCallError) return rpcError(req.id, e.code, e.message);
         return rpcError(req.id, -32603, `Tool error: ${(e as Error).message}`);
       }
     }

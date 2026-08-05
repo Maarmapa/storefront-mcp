@@ -4,8 +4,26 @@
 // Writing descriptions: start with a verb, say WHAT the tool returns, and
 // mention when a *different* tool is the better fit — agents route on these
 // strings, so a vague description costs you real sales conversations.
+//
+// For write tools the description carries two more things, and both are load
+// bearing: the CURRENT MODE (dry or live — an agent should not have to call a
+// tool to find out whether it does anything) and the true shape of the rate
+// limit. A limit described as per-tool when it is shared is paid for in
+// retries, not in confusion.
 
-export const TOOLS = [
+import { checkoutMode, modeBanner, stockAlertMode } from './write-mode';
+
+export interface ToolDef {
+  name: string;
+  description: string;
+  inputSchema: {
+    type: 'object';
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+}
+
+export const TOOLS: ToolDef[] = [
   {
     name: 'search_products',
     description:
@@ -148,7 +166,113 @@ export const TOOLS = [
       },
     },
   },
-] as const;
+];
+
+// ───────────────────────── write tools (public, guarded) ─────────────────────────
+
+/**
+ * The write tools are PUBLIC — that is the entire point, an anonymous agent is
+ * supposed to be able to buy — so they carry their protection in behavior
+ * rather than in a token. They are announced only when the deployment has the
+ * capability to honor them (see visibleTools in protocol.ts).
+ */
+export const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'create_checkout',
+  'subscribe_stock_alert',
+]);
+
+const SHARED_QUOTA_NOTE =
+  'Rate limit: 5 calls/minute per caller, SHARED with the other write tool (create_checkout and ' +
+  'subscribe_stock_alert draw from one bucket, it does not reset by alternating them).';
+
+export interface WriteCapabilities {
+  checkout: boolean;
+  stockAlert: boolean;
+}
+
+/** Build the write-tool definitions for the current capabilities and modes. */
+export function writeToolDefs(caps: WriteCapabilities): ToolDef[] {
+  const defs: ToolDef[] = [];
+
+  if (caps.checkout) {
+    defs.push({
+      name: 'create_checkout',
+      description:
+        'Create an order from a list of items and return a payment link for the HUMAN to pay. ' +
+        'This server never charges anyone. ' +
+        modeBanner(checkoutMode(), 'create a real order') +
+        ' Prices are NOT accepted from you: every unit price and total is computed server-side ' +
+        'from the catalog on this request. Duplicate lines for the same product are merged before ' +
+        'any limit or stock check, so send them however you like. A qty that is not an integer ' +
+        'greater than 0 is rejected, never rounded or defaulted. Availability is verified against ' +
+        'the inventory system line by line and the order is created ONLY if every line has enough ' +
+        'verified units: if stock is short OR cannot be verified, nothing is created. The response ' +
+        'always reports stock_available and stock_verified per line — use those numbers to adjust ' +
+        'quantities and retry, do not guess. ' +
+        SHARED_QUOTA_NOTE,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          items: {
+            type: 'array',
+            description:
+              'Items to order. Each needs a slug (a product) or a sku (a specific variant), plus ' +
+              'qty as an integer > 0. There is deliberately no price field.',
+            items: {
+              type: 'object',
+              properties: {
+                slug: { type: 'string' },
+                sku: { type: 'string' },
+                qty: { type: 'number', description: 'Integer greater than 0' },
+              },
+            },
+          },
+          customer_email: {
+            type: 'string',
+            description:
+              "Optional. Stored on the order only; no automated mail is sent to it from this tool.",
+          },
+          note: { type: 'string', description: 'Optional note for the order (max 500 chars)' },
+          ref: { type: 'string', description: 'Optional referral key for conversion tracking' },
+        },
+        required: ['items'],
+      },
+    });
+  }
+
+  if (caps.stockAlert) {
+    defs.push({
+      name: 'subscribe_stock_alert',
+      description:
+        'Start a back-in-stock alert for one product. ' +
+        modeBanner(stockAlertMode(), 'send one confirmation email') +
+        ' This tool NEVER activates a subscription: at most it sends ONE confirmation email to the ' +
+        'address given, and the subscription exists only after the human confirms it, so tell the ' +
+        'customer to check their inbox rather than telling them they are subscribed. It refuses ' +
+        'when the product is actually in stock (buy it instead), when availability cannot be ' +
+        'confirmed as unavailable, when that address is already subscribed to that product, and ' +
+        'when the address has already received 3 confirmation emails in the last hour — that last ' +
+        'quota is per RECIPIENT and does not reset by changing caller. ' +
+        SHARED_QUOTA_NOTE,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          email: {
+            type: 'string',
+            description:
+              'Address of the person who wants the alert. Ask the human for it; do not invent one ' +
+              'and do not reuse an address from another context.',
+          },
+          slug: { type: 'string', description: 'Exact product slug' },
+          sku: { type: 'string', description: 'Optional: alert on one specific variant of that product' },
+        },
+        required: ['email', 'slug'],
+      },
+    });
+  }
+
+  return defs;
+}
 
 /**
  * The privilege boundary. Tools in this set expose back-office data (revenue,
