@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.maarmapa/storefront-mcp",
+  "description": "E-commerce storefront over MCP: public catalog tools (search, product detail, variant charts with per-variant stock, promotions, quotes) for AI agents, plus 5 token-gated back-office tools (stock, orders, sales) for the store owner.",
+  "repository": {
+    "url": "https://github.com/Maarmapa/storefront-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/Maarmapa/storefront-mcp",
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "storefront-mcp",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "CATALOG_ADAPTER",
+          "description": "Which catalog adapter to use: \"memory\" (bundled demo catalog, no setup) or \"woocommerce\" (Store API skeleton).",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "memory"
+        },
+        {
+          "name": "MCP_SECRET",
+          "description": "Unlocks the 5 sensitive back-office tools (stock, orders, sales). On stdio the presence of this variable in the server process env unlocks them; leave it unset to expose only the 6 public catalog tools.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "MCP_SERVER_NAME",
+          "description": "Override the advertised server name.",
+          "isRequired": false,
+          "isSecret": false,
+          "default": "storefront-mcp"
+        }
+      ]
+    }
+  ]
+}

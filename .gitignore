@@ -10,6 +10,10 @@ out/
 .env.*
 !.env.example
 
+# build output of the standalone CLI (npm run build:cli)
+dist/
+*.tgz
+
 # misc
 .DS_Store
 *.tsbuildinfo

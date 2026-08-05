@@ -7,6 +7,60 @@ catalog; only you get your back office.
 
 ---
 
+## Quickstart (30 seconds)
+
+```bash
+npx storefront-mcp
+```
+
+That starts an MCP server over **stdio** serving a demo catalog (the bundled
+`memory` adapter) with the 6 public tools. Plug it into Claude Desktop or
+Claude Code by adding this to your MCP config (`claude_desktop_config.json`,
+or `claude mcp add storefront -- npx storefront-mcp`):
+
+```json
+{
+  "mcpServers": {
+    "storefront": {
+      "command": "npx",
+      "args": ["storefront-mcp"]
+    }
+  }
+}
+```
+
+Want the 5 back-office tools too? On stdio there is no HTTP header, so the
+gate is the presence of `MCP_SECRET` in the server process env — whoever
+launches the process owns the machine it runs on:
+
+```json
+{
+  "mcpServers": {
+    "storefront": {
+      "command": "npx",
+      "args": ["storefront-mcp"],
+      "env": { "MCP_SECRET": "anything-non-empty" }
+    }
+  }
+}
+```
+
+Prefer curl? `npx storefront-mcp --http 8787` serves the same JSON-RPC
+contract over plain HTTP on localhost, with the real
+`Authorization: Bearer <MCP_SECRET>` check (same behavior as the Next.js
+route below):
+
+```bash
+npx storefront-mcp --http 8787 &
+curl -s http://127.0.0.1:8787/ -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+Pick the adapter with `CATALOG_ADAPTER` (`memory` by default,
+`woocommerce` for the Store API skeleton). To serve your own catalog, write
+an adapter (see below) — the CLI, the Next.js route and the registry entry
+(`server.json`) all reuse the same tool definitions and privilege boundary.
+
 ## What is this
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server, packaged
@@ -41,7 +95,8 @@ under your own rules.
 **An agent may browse the shop window; it never sees the operation.**
 
 Every tool is either *public* or *sensitive*, and the boundary is enforced
-twice in the protocol layer (`src/app/api/mcp/route.ts`):
+twice in the protocol layer (`src/lib/protocol.ts`, shared by the Next.js
+route and the standalone CLI):
 
 1. **`tools/list`** — without a valid `Authorization: Bearer <MCP_SECRET>`
    header, only the public tools are returned. Sensitive tools are not merely
@@ -54,6 +109,12 @@ sensitive tools are blocked for everyone. There is no
 "nothing-configured-so-everything-is-open" mode. Token comparison is
 constant-time.
 
+Transport nuance: over HTTP (the Next.js route and `--http` mode) the gate is
+the Bearer header, because remote callers are untrusted. Over **stdio**
+(`npx storefront-mcp`) there is no header — the client and server share a
+machine — so the gate is whether `MCP_SECRET` exists in the server process
+env. Same boundary, enforced at the trust seam each transport actually has.
+
 The same split exists at the data layer: the `CatalogAdapter` interface only
 knows public storefront data, and the optional `OpsAdapter` (orders, revenue,
 exact stock) is a separate contract you can simply not implement — in which
@@ -61,7 +122,9 @@ case sensitive tools return an error even to authenticated callers. Ops
 implementations must anonymize customer PII: line items carry name/qty/price,
 never emails, addresses or phone numbers, even behind auth.
 
-## Quickstart (2 minutes)
+## Quickstart as a web endpoint (2 minutes)
+
+To serve MCP from your own domain (the deployable Next.js route):
 
 ```bash
 git clone <this repo> && cd storefront-mcp
@@ -142,6 +205,11 @@ Agents can only call what they can find. Two artifacts, templates in
 Additionally, `GET /api/mcp` returns a JSON descriptor so anyone poking the
 endpoint understands what it is.
 
+For the official [MCP Registry](https://registry.modelcontextprotocol.io),
+`server.json` at the repo root is the manifest: it points at the
+`storefront-mcp` npm package with stdio transport, so registry clients can
+run it via `npx`.
+
 ## Serving MCP from your WordPress domain
 
 If your storefront runs WordPress/WooCommerce but the MCP server deploys
@@ -181,13 +249,17 @@ template is for the cases it does not cover:
 ## Repository layout
 
 ```
-src/app/api/mcp/route.ts      protocol layer (JSON-RPC, auth boundary, dispatch)
+src/lib/protocol.ts           protocol core (JSON-RPC, auth boundary, dispatch) — shared by both transports
+src/app/api/mcp/route.ts      Next.js transport (Streamable HTTP + Bearer)
+src/cli/cli.ts                standalone transport: `npx storefront-mcp` (stdio via the official MCP SDK, or --http)
 src/lib/tools.ts              tool definitions + SENSITIVE_TOOLS set
 src/lib/adapter.ts            CatalogAdapter / OpsAdapter contracts + types
 src/lib/adapters/memory.ts    reference adapter (toy catalog, fake back office)
 src/lib/adapters/woocommerce.ts  Store API skeleton with TODOs
 src/lib/adapters/index.ts     adapter registry (env CATALOG_ADAPTER)
-examples/toy-catalog.json     the 2-minute demo data
+examples/toy-catalog.json     the demo data
+server.json                   MCP Registry manifest (registry.modelcontextprotocol.io)
+tsconfig.build.json           compiles lib + cli to dist/ for the npm bin
 discovery/                    /.well-known/mcp.json + llms.txt templates
 wordpress-proxy/mcp-proxy.php mu-plugin to serve MCP under your WP domain
 ```
@@ -202,6 +274,51 @@ Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 **Plantilla de servidor MCP para tiendas online.** Los agentes de IA ven tu
 catálogo; tu operación la ves solo tú.
+
+## Partir en 30 segundos
+
+```bash
+npx storefront-mcp
+```
+
+Eso levanta un servidor MCP por **stdio** con un catálogo de demostración (el
+adaptador `memory`) y las 6 tools públicas. Para conectarlo a Claude Desktop
+o Claude Code, agrega esto a tu configuración MCP (o ejecuta
+`claude mcp add storefront -- npx storefront-mcp`):
+
+```json
+{
+  "mcpServers": {
+    "storefront": {
+      "command": "npx",
+      "args": ["storefront-mcp"]
+    }
+  }
+}
+```
+
+¿Quieres también las 5 tools de trastienda? En stdio no existe el header
+HTTP, así que la llave es la **presencia** de `MCP_SECRET` en el entorno del
+proceso del servidor (quien lanza el proceso es dueño de la máquina donde
+corre):
+
+```json
+{
+  "mcpServers": {
+    "storefront": {
+      "command": "npx",
+      "args": ["storefront-mcp"],
+      "env": { "MCP_SECRET": "cualquier-valor-no-vacio" }
+    }
+  }
+}
+```
+
+¿Prefieres curl? `npx storefront-mcp --http 8787` sirve el mismo contrato
+JSON-RPC por HTTP en localhost, con el chequeo real de
+`Authorization: Bearer <MCP_SECRET>` (mismo comportamiento que la ruta de
+Next.js). El adaptador se elige con `CATALOG_ADAPTER` (`memory` por defecto,
+`woocommerce` para el esqueleto de la Store API).
 
 ## Qué es
 
@@ -245,6 +362,13 @@ entorno, las tools sensibles quedan bloqueadas para todos. No existe el modo
 "no configuré nada, entonces todo queda abierto". La comparación del token es
 de tiempo constante.
 
+Matiz por transporte: sobre HTTP (la ruta de Next.js y el modo `--http`) la
+llave es el header Bearer, porque quien llama desde afuera no es de
+confianza. Sobre **stdio** (`npx storefront-mcp`) no hay header — cliente y
+servidor comparten la máquina — así que la llave es que `MCP_SECRET` exista
+en el entorno del proceso. Es el mismo límite, aplicado en la costura de
+confianza que cada transporte realmente tiene.
+
 La misma separación existe en la capa de datos: `CatalogAdapter` solo conoce
 datos públicos de vitrina, y el `OpsAdapter` (órdenes, ventas, stock exacto)
 es un contrato aparte que puedes simplemente no implementar. Las
@@ -252,7 +376,9 @@ implementaciones de ops deben anonimizar la información de clientes: los
 ítems llevan nombre/cantidad/precio, nunca correos, direcciones ni teléfonos,
 incluso detrás de la autenticación.
 
-## Partir en 2 minutos
+## Partir como endpoint web (2 minutos)
+
+Para servir MCP desde tu propio dominio (la ruta de Next.js desplegable):
 
 ```bash
 git clone <este repo> && cd storefront-mcp
