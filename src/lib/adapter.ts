@@ -266,7 +266,11 @@ export interface StockRow {
   found: boolean;
   name?: string;
   brand?: string | null;
+  /** Omitted entirely when the count could not be verified — never a phantom 0. */
   stock_available?: number;
+  stock_verified?: boolean;
+  /** Why the count is missing, when it is. */
+  reason?: string;
   price?: number | null;
 }
 

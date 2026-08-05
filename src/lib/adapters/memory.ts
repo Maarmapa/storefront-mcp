@@ -3,16 +3,32 @@
 // cloning the repo, and the reference implementation to copy when writing
 // a real one.
 //
-// It implements BOTH contracts (catalog + ops) from the same file, faking
-// the back office with the sample orders in the JSON. A real deployment
-// would keep those in separate modules with separate credentials.
+// It implements ALL FIVE contracts from the same file (catalog, ops,
+// inventory, checkout, notify), faking the back office with the sample data
+// in the JSON. A real deployment would keep them in separate modules with
+// separate credentials — the catalog is public, the rest is not.
+//
+// The one structural thing worth copying: every stock answer in this file —
+// get_color_card, get_stock_bulk, get_quote and the write-path availability
+// check — comes out of ONE function, `lookupUnits`, reading ONE section of
+// the data. A write path that validates against a different source than the
+// one it shows the customer is a bug waiting for a busy Friday.
 
+import { randomBytes } from 'node:crypto';
 import catalogData from '../../../examples/toy-catalog.json';
 import type {
+  AvailabilityRow,
   BrandSummary,
   CatalogAdapter,
+  CheckoutAdapter,
+  CheckoutDraft,
+  CheckoutReceipt,
   ColorCard,
+  InventoryAdapter,
+  LineRef,
+  NotifyAdapter,
   OpsAdapter,
+  OptInEmail,
   OrderDetail,
   OrderSummary,
   Product,
@@ -24,6 +40,7 @@ import type {
   StockRow,
   TopProduct,
 } from '../adapter';
+import { refKey } from '../availability';
 
 interface ToyProduct {
   slug: string;
@@ -41,7 +58,6 @@ interface ToyColor {
   name: string;
   sku: string | null;
   hex: string | null;
-  stock: number | null;
 }
 
 interface ToyCard {
@@ -67,6 +83,7 @@ interface ToyOrder {
 const data = catalogData as unknown as {
   store: { name: string; currency: string; domain: string };
   products: ToyProduct[];
+  inventory: { by_sku: Record<string, number>; by_slug: Record<string, number> };
   colorCards: ToyCard[];
   promotions: string[];
   orders: ToyOrder[];
@@ -74,6 +91,44 @@ const data = catalogData as unknown as {
 
 const CURRENCY = data.store.currency;
 const BASE_URL = `https://${data.store.domain}`;
+
+// ───────────────────────── the single stock source ─────────────────────────
+
+/**
+ * The only place in this adapter that answers "how many units?".
+ *
+ * Note what it does NOT do: it never falls back to 0 and never falls back to
+ * "probably available". A SKU the catalog knows but the inventory table does
+ * not is `units: null` — an unmapped variant, which is a real and common
+ * state in stores whose catalog and inventory live in different systems.
+ */
+function lookupUnits(ref: LineRef): { units: number | null; verified: boolean; reason?: string } {
+  if (ref.sku) {
+    const units = data.inventory.by_sku[ref.sku];
+    if (typeof units === 'number') return { units, verified: true };
+    const inCatalog = data.colorCards.some(c => c.colors.some(col => col.sku === ref.sku));
+    return {
+      units: null,
+      verified: false,
+      reason: inCatalog
+        ? 'variant exists in the catalog but is not mapped in the inventory system'
+        : 'sku unknown to this store',
+    };
+  }
+  if (ref.slug) {
+    const units = data.inventory.by_slug[ref.slug];
+    if (typeof units === 'number') return { units, verified: true };
+    const inCatalog = data.products.some(p => p.slug === ref.slug);
+    return {
+      units: null,
+      verified: false,
+      reason: inCatalog
+        ? 'product has no row in the stock snapshot'
+        : 'slug unknown to this store',
+    };
+  }
+  return { units: null, verified: false, reason: 'line has neither slug nor sku' };
+}
 
 function normalize(s: string): string {
   return s
@@ -176,15 +231,20 @@ export class MemoryCatalogAdapter implements CatalogAdapter {
       base_price: card.base_price,
       currency: CURRENCY,
       url: `${BASE_URL}/colors/${card.slug}`,
-      stock_verified: true, // in-memory data is always "reachable"
-      colors: card.colors.map(c => ({
-        code: c.code,
-        name: c.name,
-        sku: c.sku,
-        hex: c.hex,
-        stock: c.stock,
-        available: c.stock == null ? null : c.stock > 0,
-      })),
+      // The in-memory table is always reachable, so the CARD is verified even
+      // when an individual variant inside it is not (see G09 in the demo data).
+      stock_verified: true,
+      colors: card.colors.map(c => {
+        const { units } = lookupUnits({ sku: c.sku ?? undefined });
+        return {
+          code: c.code,
+          name: c.name,
+          sku: c.sku,
+          hex: c.hex,
+          stock: units,
+          available: units == null ? null : units > 0,
+        };
+      }),
     };
   }
 
@@ -202,6 +262,10 @@ export class MemoryCatalogAdapter implements CatalogAdapter {
     const rejected: Quote['rejected'] = [];
 
     for (const it of items) {
+      // A quote is a non-binding estimate, so clamping a sloppy qty here is
+      // harmless. create_checkout does NOT get this liberty: it rejects an
+      // invalid quantity outright, because there the number ends up on
+      // something a human pays. See src/lib/cart.ts.
       const qty = Math.max(1, Math.floor(it.qty || 1));
       if (it.sku) {
         // A SKU points at a chart variant.
@@ -210,7 +274,8 @@ export class MemoryCatalogAdapter implements CatalogAdapter {
           const col = card.colors.find(c => c.sku === it.sku);
           if (col) {
             found = true;
-            if (col.stock != null && col.stock <= 0) {
+            const { units } = lookupUnits({ sku: it.sku });
+            if (units != null && units <= 0) {
               rejected.push({ sku: it.sku, reason: 'out of stock' });
             } else {
               const price = card.base_price ?? 0;
@@ -268,12 +333,18 @@ export class MemoryOpsAdapter implements OpsAdapter {
       for (const card of data.colorCards) {
         const col = card.colors.find(c => c.sku === sku);
         if (col) {
+          // Same source as the write path — and `stock_available` is simply
+          // ABSENT when unverified, rather than reported as 0. A back-office
+          // tool that shows a phantom zero gets a real product delisted.
+          const { units, verified, reason } = lookupUnits({ sku });
           return {
             sku,
             found: true,
             name: `${card.brand_name} ${card.product_name} ${col.code}`,
             brand: card.brand_name,
-            stock_available: col.stock ?? 0,
+            ...(units == null ? {} : { stock_available: units }),
+            stock_verified: verified,
+            ...(reason ? { reason } : {}),
             price: card.base_price,
           };
         }
@@ -370,4 +441,88 @@ export class MemoryOpsAdapter implements OpsAdapter {
       top_5_brands_by_revenue: topBrands,
     };
   }
+}
+
+// ───────────────────── inventory (drives the write guard) ─────────────────────
+
+/**
+ * The same table the read tools use, exposed as the write path's source of
+ * truth. In a real store this is where you would query your ERP / POS / stock
+ * snapshot — and, critically, subtract whatever is already committed
+ * elsewhere (open reservations, unpaid holds, picking lists), because
+ * "physically on the shelf" is not "sellable to this customer".
+ */
+export class MemoryInventoryAdapter implements InventoryAdapter {
+  async getAvailability(refs: LineRef[]): Promise<AvailabilityRow[]> {
+    return refs.map(ref => ({ ...ref, ...lookupUnits(ref) }));
+  }
+}
+
+// ───────────────────────── checkout (demo, creates nothing real) ─────────────────────────
+
+/** Where a real adapter would have a database. Resets when the process does. */
+const createdOrders: Array<{ short_id: string; draft: CheckoutDraft; created_at: string }> = [];
+
+export class MemoryCheckoutAdapter implements CheckoutAdapter {
+  async createCheckout(draft: CheckoutDraft): Promise<CheckoutReceipt> {
+    const short_id = `DM-${randomBytes(3).toString('hex').toUpperCase()}`;
+    createdOrders.push({ short_id, draft, created_at: new Date().toISOString() });
+    return {
+      order_short_id: short_id,
+      total: draft.subtotal,
+      currency: draft.currency,
+      payment_url: `${BASE_URL}/pay/${short_id}`,
+      note:
+        'DEMO ORDER — nothing was charged and no units were reserved. Note the second half ' +
+        'of that sentence: in most stacks an order does NOT hold inventory, so the ' +
+        'availability check in the protocol layer is the only thing between an agent loop ' +
+        'and an oversell. If your backend can reserve, reserve here.',
+    };
+  }
+}
+
+/** Demo/inspection helper — not part of the CheckoutAdapter contract. */
+export function demoCreatedOrders(): ReadonlyArray<{ short_id: string; created_at: string }> {
+  return createdOrders.map(o => ({ short_id: o.short_id, created_at: o.created_at }));
+}
+
+// ───────────────────────── back-in-stock alerts (double opt-in) ─────────────────────────
+
+const confirmedSubscriptions = new Set<string>();
+const outbox: OptInEmail[] = [];
+
+function subKey(email: string, ref: LineRef): string {
+  return `${email.toLowerCase()}|${refKey(ref)}`;
+}
+
+export class MemoryNotifyAdapter implements NotifyAdapter {
+  async isSubscribed(email: string, ref: LineRef): Promise<boolean> {
+    return confirmedSubscriptions.has(subKey(email, ref));
+  }
+
+  async sendOptInEmail(msg: OptInEmail): Promise<void> {
+    outbox.push(msg);
+    // A real adapter calls its email provider here. Stderr keeps the demo
+    // honest: you can watch exactly one message leave, and see that a repeat
+    // call produces none.
+    process.stderr.write(
+      `[storefront-mcp] DEMO opt-in email → ${msg.email} | ${msg.product_name} | confirm: ${msg.confirm_url}\n`,
+    );
+  }
+
+  async confirmSubscription(email: string, ref: LineRef): Promise<{ created: boolean }> {
+    // Idempotent on purpose: humans double-click, browsers re-POST, and a
+    // second confirmation is a success, not an error. A SQL implementation
+    // does the same by treating a unique-constraint violation as OK and
+    // propagating every other error.
+    const key = subKey(email, ref);
+    if (confirmedSubscriptions.has(key)) return { created: false };
+    confirmedSubscriptions.add(key);
+    return { created: true };
+  }
+}
+
+/** Demo/inspection helper — not part of the NotifyAdapter contract. */
+export function demoOutbox(): ReadonlyArray<OptInEmail> {
+  return outbox;
 }
