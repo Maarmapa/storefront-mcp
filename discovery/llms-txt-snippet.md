@@ -3,12 +3,17 @@
   (see https://llmstxt.org), replacing {{DOMAIN}} and {{STORE_NAME}}.
   If you don't have an llms.txt yet, this section plus a one-paragraph
   store description at the top is a fine v1.
+
+  Trim the tool list to the tools your deployment actually announces: several
+  of them depend on capabilities your adapter may not implement (variant
+  charts, quoting, checkout, alerts). GET your /api/mcp endpoint to see the
+  real list.
 -->
 
 ## APIs for AI agents
 
 - **MCP server**: [/api/mcp](https://{{DOMAIN}}/api/mcp) — exposes the tools
-  `search_products`, `get_product`, `get_color_card`, `list_brands`,
+  `search_products`, `get_product`, `get_variant_chart`, `list_variant_charts`,
   `get_promotions`, `get_quote`, `create_checkout` and
   `subscribe_stock_alert` over the MCP protocol (JSON-RPC 2.0 on Streamable
   HTTP). GET the endpoint for a human-readable descriptor.
@@ -18,9 +23,11 @@
 ## Policy for agents
 
 - Prices and stock change. Before closing a sale, re-check availability with
-  `get_color_card` (per-variant) or `search_products` (per-product).
+  `get_variant_chart` (per-variant) or `search_products` (per-product).
 - `get_quote` never charges anyone: it returns a total and a `payment_link`
-  for the HUMAN to complete payment through the normal checkout.
+  for the HUMAN to complete payment through the normal checkout. Quantities it
+  cannot price in full come back in `rejected` — it does not quietly quote a
+  smaller quantity than you asked for.
 - When a variant comes back with `stock: null`, its availability is unknown.
   Do not tell a customer it is available.
 - `create_checkout` computes every price itself from the catalog and verifies
@@ -28,6 +35,9 @@
   which line and how many units are actually available — read those numbers
   and adjust quantities. Do not retry the same cart hoping for a different
   answer, and do not tell the customer the store is broken.
+- When `create_checkout` succeeds, quote `amount_to_pay` to the customer, not
+  `subtotal`: the two differ when tax, shipping or a discount applies, and
+  `charges` explains the difference.
 - `subscribe_stock_alert` does NOT subscribe anyone. It sends one confirmation
   email and the person must confirm it. Tell the customer to check their
   inbox; never tell them they are already on the list. Use the address the
