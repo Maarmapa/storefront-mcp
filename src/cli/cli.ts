@@ -86,18 +86,17 @@ function log(msg: string): void {
  */
 function writeToolStatus(tools: Array<{ name: string }>): string {
   const has = (n: string) => tools.some(t => t.name === n);
-  const parts: string[] = [];
-  parts.push(
-    has('create_checkout')
-      ? `create_checkout=${checkoutMode()}`
-      : 'create_checkout=absent (needs checkout+inventory adapters)',
-  );
-  parts.push(
-    has('subscribe_stock_alert')
-      ? `subscribe_stock_alert=${stockAlertMode()}`
-      : 'subscribe_stock_alert=absent (needs notify adapter)',
-  );
-  return parts.join(', ');
+  // A missing tool has two very different causes and the operator needs to
+  // know which one: "you switched it off" is not "your adapter cannot do it".
+  const describe = (name: string, mode: string, missingCapability: string) => {
+    if (has(name)) return `${name}=${mode}`;
+    if (mode === 'off') return `${name}=off (kill switch)`;
+    return `${name}=absent (${missingCapability})`;
+  };
+  return [
+    describe('create_checkout', checkoutMode(), 'needs checkout + inventory adapters'),
+    describe('subscribe_stock_alert', stockAlertMode(), 'needs notify adapter'),
+  ].join(', ');
 }
 
 // ───────────────────────── stdio mode (default) ─────────────────────────
