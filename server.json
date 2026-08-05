@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.maarmapa/storefront-mcp",
+  "name": "io.github.Maarmapa/storefront-mcp",
   "description": "E-commerce storefront over MCP: public catalog tools plus token-gated back-office tools.",
   "repository": {
     "url": "https://github.com/Maarmapa/storefront-mcp",
