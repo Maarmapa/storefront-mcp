@@ -19,10 +19,19 @@
 // number of instances:
 //
 //   - fail-closed availability: no verified units, no order (src/lib/commerce.ts),
+//   - the atomic reservation at the inventory source, which is the only thing
+//     that survives CONCURRENT calls (InventoryAdapter.reserve),
 //   - out-of-stock precondition before any email goes out,
 //   - dedupe on (recipient, product) at the point the email is sent,
 //   - double opt-in: nothing is persisted without a human POST,
 //   - per-tool kill switch, dry by default (src/lib/write-mode.ts).
+//
+// Note which quota is NOT on that list: the per-recipient email quota below.
+// It is defined here, it is evaluated by the same Map, and it therefore has
+// exactly the same weaknesses. It becomes a real ceiling only when the
+// NotifyAdapter implements `countOptInEmails` and answers it from durable
+// storage; when it does not, the tool response says the quota is best-effort
+// rather than claiming a limit this file cannot hold.
 //
 // To make the counter real, replace the store below with Redis/KV/Durable
 // Objects. `rateLimited` is deliberately a tiny synchronous port with a single
@@ -107,9 +116,49 @@ export function resetRateLimits(): void {
 export const WRITE_TOOL_QUOTA = { max: 5, windowMs: 60_000 };
 
 /**
+ * The quota used when this deployment CANNOT tell callers apart — no trusted
+ * proxy header configured and no socket address available (see
+ * src/lib/client-ip.ts).
+ *
+ * It is deliberately not "5 per minute for everyone". Two ways to be wrong
+ * here, and both are real:
+ *
+ *   - key the bucket on a forgeable header → one caller mints a fresh quota
+ *     per request and the limit does nothing,
+ *   - collapse every caller into one 5/min bucket → the sixth call of the
+ *     minute fails FOR EVERYBODY, so one looping agent (or one WordPress
+ *     proxy that forwards no client identity) takes checkout down for the
+ *     whole store. A rate limit that turns into a denial of service against
+ *     legitimate customers is worse than no rate limit.
+ *
+ * So an unattributed deployment gets a process-wide CEILING: high enough that
+ * normal traffic never touches it, low enough that a tight loop still hits a
+ * wall. It is described as what it is everywhere it is mentioned — a ceiling
+ * for this instance, not a per-caller promise.
+ */
+export const UNATTRIBUTED_WRITE_QUOTA = { max: 60, windowMs: 60_000 };
+
+/**
  * Per-RECIPIENT quota for the confirmation email, evaluated independently of
  * the caller quota above. The scarce resource being protected here is somebody
  * else's inbox and your sending domain's reputation, and neither of those is
  * keyed by IP.
+ *
+ * Keyed by the CANONICAL mailbox (src/lib/email.ts), not by the string the
+ * caller typed: `victim@`, `victim+1@` and `v.i.c.t.i.m@` are one inbox at
+ * most providers, and a quota keyed on the literal string hands an attacker
+ * one fresh allowance per spelling.
+ *
+ * Enforced durably when the NotifyAdapter implements `countOptInEmails`;
+ * otherwise it falls back to the in-memory counter above, with the weakening
+ * stated in the tool's own response.
  */
 export const ALERT_EMAIL_QUOTA = { max: 3, windowMs: 60 * 60_000 };
+
+/**
+ * How long an unconfirmed opt-in email suppresses another one for the same
+ * (mailbox, product). The dedupe that matters is not "is this address already
+ * subscribed" — an attacker never confirms — it is "did we already mail this
+ * person about this product and get no answer".
+ */
+export const OPT_IN_PENDING_WINDOW_MS = 60 * 60_000;

@@ -1,67 +1,124 @@
-// Resolving the caller's address, in ONE place so the transports cannot drift.
+// Resolving WHO is calling, in ONE place so the transports cannot drift.
 //
-// The trap: `x-forwarded-for` is a list the request walks through, and the
-// LEFTMOST entry is whatever the CLIENT wrote. Keying a rate limit on
-// `xff.split(',')[0]` gives the caller a brand new quota bucket per request —
-// send `X-Forwarded-For: 1.2.3.4`, then `1.2.3.5`, and the limiter is a no-op
-// with extra steps.
+// ─────────────────────── THE MISTAKE THIS FILE MAKES EXPLICIT ───────────────────────
 //
-// Rules, in order:
-//   1. Prefer a header your own proxy/platform writes and strips from client
-//     input (x-vercel-forwarded-for, x-real-ip, cf-connecting-ip...). Those
-//     cannot be forged from outside.
-//   2. Falling back to x-forwarded-for, take the LAST value: it was appended
-//      by the hop closest to you. Everything to its left is caller-supplied
-//      text and is worth nothing.
+// Every "get the client IP" helper on the internet reads a forwarding header:
+// x-forwarded-for, x-real-ip, cf-connecting-ip. The subtlety usually stops at
+// "don't take the FIRST x-forwarded-for entry, take the last one, because the
+// left side is caller-supplied".
 //
-// If you deploy behind a different edge, add its header to PLATFORM_HEADERS —
-// and make sure that edge overwrites it rather than appending to it.
-
-/** Headers written by the infrastructure, not by the caller. Order = priority. */
-const PLATFORM_HEADERS = [
-  'x-vercel-forwarded-for',
-  'cf-connecting-ip',
-  'fly-client-ip',
-  'true-client-ip',
-  'x-real-ip',
-];
+// That advice is only half the problem, and the half it misses is the one that
+// bites. A forwarding header is written by a proxy. If there is NO proxy in
+// front of you — `node server.js` on a VPS, a bare `next start`, an nginx
+// without `proxy_set_header`, a container with a public port — then the
+// *entire* header, last hop included, is a string the caller typed. Rotating
+// `X-Forwarded-For: 203.0.113.1, .2, .3` then mints a brand new quota bucket
+// per request and the rate limit is a no-op with extra steps.
+//
+// So this module inverts the default. Forwarding headers are NOT trusted
+// unless the operator names the one their edge writes:
+//
+//   TRUSTED_PROXY_HEADER=x-vercel-forwarded-for   (Vercel)
+//   TRUSTED_PROXY_HEADER=cf-connecting-ip         (Cloudflare)
+//   TRUSTED_PROXY_HEADER=x-storefront-client-ip   (the bundled WordPress proxy)
+//
+// Naming a header is an ASSERTION with a precondition: "my edge overwrites
+// this header on every request, AND nothing else can reach this origin". If
+// your origin is publicly reachable, that header is forgeable by anyone who
+// finds the origin URL, and you are back where you started — put the origin
+// behind the edge (Vercel deployment protection, a firewall, an allowlist,
+// mTLS) or accept that the counter is decorative.
+//
+// With no trusted header configured, the transport's own answer is used when
+// it has one (the TCP peer address, which nobody can forge) and otherwise the
+// caller is UNATTRIBUTED — and an unattributed deployment gets a different,
+// clearly-labelled quota shape instead of a per-caller promise it cannot keep.
+// See src/lib/ratelimit.ts.
 
 export type HeaderLookup = (name: string) => string | string[] | null | undefined;
 
-function first(value: string | string[] | null | undefined): string | null {
+/** Key used when callers cannot be told apart on this deployment. */
+export const UNATTRIBUTED_KEY = 'unattributed';
+
+export interface CallerIdentity {
+  /**
+   * Quota key. Named to match CallContext in src/lib/commerce.ts so a
+   * transport can hand this object straight to the protocol layer without an
+   * adapter step that could quietly drop the `attributed` flag.
+   */
+  clientKey: string;
+  /**
+   * True when `clientKey` identifies one caller and cannot be set by that
+   * caller. False means every caller shares it — the quota is then a process-wide
+   * ceiling, not a per-caller one, and every message that mentions it says so.
+   */
+  attributed: boolean;
+  /** How it was resolved: for startup logs and the descriptor. */
+  source: 'trusted-header' | 'socket' | 'stdio' | 'none';
+}
+
+export const UNATTRIBUTED: CallerIdentity = {
+  clientKey: UNATTRIBUTED_KEY,
+  attributed: false,
+  source: 'none',
+};
+
+/** env TRUSTED_PROXY_HEADER, normalized. Null when the operator set nothing. */
+export function trustedProxyHeader(): string | null {
+  const h = (process.env.TRUSTED_PROXY_HEADER ?? '').trim().toLowerCase();
+  return h.length > 0 ? h : null;
+}
+
+function firstValue(value: string | string[] | null | undefined): string | null {
   if (value == null) return null;
+  // Node collapses repeated headers into an array; the last one is the one the
+  // closest hop appended.
   const v = Array.isArray(value) ? value[value.length - 1] : value;
   const s = (v ?? '').trim();
   return s.length > 0 ? s : null;
 }
 
 /**
- * Best-effort caller identity for rate limiting. Returns "unknown" rather than
- * throwing: an unresolvable address must not take the server down, it just
- * shares one bucket with every other unresolvable caller.
+ * Resolve the caller from request headers plus whatever the transport knows.
+ *
+ * @param get           header lookup for this request
+ * @param socketAddress the peer address the transport observed, when it has
+ *                      one (node:http gives you `req.socket.remoteAddress`;
+ *                      a serverless Fetch handler does not). Unforgeable.
  */
-export function clientIpFrom(get: HeaderLookup): string {
-  for (const h of PLATFORM_HEADERS) {
-    const v = first(get(h));
-    if (v) return v.split(',').pop()!.trim();
+export function resolveCaller(get: HeaderLookup, socketAddress?: string | null): CallerIdentity {
+  const trusted = trustedProxyHeader();
+  if (trusted) {
+    const raw = firstValue(get(trusted));
+    if (raw) {
+      // Even a trusted header can be a list (x-forwarded-for style). The LAST
+      // entry is the one the closest hop appended; everything to its left came
+      // from further out and is worth nothing.
+      const last = raw.split(',').pop()?.trim();
+      if (last) return { clientKey: `ip:${last}`, attributed: true, source: 'trusted-header' };
+    }
+    // Configured but absent: do NOT silently fall back to another header. A
+    // missing trusted header means this request did not come through the edge
+    // the operator described, which is exactly the case worth not trusting.
   }
-  const xff = first(get('x-forwarded-for'));
-  if (xff) {
-    // LAST hop, not first — see the header comment.
-    const last = xff.split(',').pop()?.trim();
-    if (last) return last;
-  }
-  return 'unknown';
+
+  const sock = (socketAddress ?? '').trim();
+  if (sock) return { clientKey: `sock:${sock}`, attributed: true, source: 'socket' };
+
+  return UNATTRIBUTED;
 }
 
 /** Convenience wrapper for the Fetch API `Headers` object (Next.js route). */
-export function clientIpFromHeaders(headers: { get(name: string): string | null }): string {
-  return clientIpFrom(name => headers.get(name));
+export function resolveCallerFromHeaders(headers: { get(name: string): string | null }): CallerIdentity {
+  // A Fetch-style handler has no socket: without a trusted header this is
+  // deliberately unattributed rather than optimistically forged.
+  return resolveCaller(name => headers.get(name), null);
 }
 
-/** Convenience wrapper for node:http `IncomingHttpHeaders`. */
-export function clientIpFromNodeHeaders(
+/** Convenience wrapper for node:http. */
+export function resolveCallerFromNode(
   headers: Record<string, string | string[] | undefined>,
-): string {
-  return clientIpFrom(name => headers[name]);
+  socketAddress?: string | null,
+): CallerIdentity {
+  return resolveCaller(name => headers[name], socketAddress);
 }

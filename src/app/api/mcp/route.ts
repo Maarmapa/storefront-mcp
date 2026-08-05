@@ -14,7 +14,7 @@
 // protocol.
 
 import { NextRequest, NextResponse } from 'next/server';
-import { clientIpFromHeaders } from '@/lib/client-ip';
+import { resolveCallerFromHeaders } from '@/lib/client-ip';
 import {
   discoveryDescriptor,
   handleRequest,
@@ -48,10 +48,16 @@ export async function POST(req: NextRequest) {
   const authorized = isAuthorizedHeader(req.headers.get('authorization'));
 
   // Caller identity for the write-tool quota. Resolved by the shared module in
-  // src/lib/client-ip.ts so this route and the CLI cannot disagree about which
-  // header to trust — and it never reads the FIRST x-forwarded-for value,
-  // which the caller writes.
-  const ctx = { clientKey: clientIpFromHeaders(req.headers) };
+  // src/lib/client-ip.ts so this route and the CLI cannot disagree.
+  //
+  // A Fetch-style handler has no socket to ask, so on this transport the ONLY
+  // trustworthy identity is a header the operator has explicitly declared
+  // (TRUSTED_PROXY_HEADER=x-vercel-forwarded-for on Vercel, cf-connecting-ip
+  // behind Cloudflare, and so on). Without that declaration the caller is
+  // deliberately unattributed and the quota becomes an instance-wide ceiling —
+  // guessing at a forwarding header nobody promised to write is how a rate
+  // limit turns into decoration.
+  const ctx = resolveCallerFromHeaders(req.headers);
 
   if (Array.isArray(body)) {
     const responses = (
