@@ -17,3 +17,6 @@ dist/
 # misc
 .DS_Store
 *.tsbuildinfo
+
+# build output of the test compile (npm test)
+dist-test/
