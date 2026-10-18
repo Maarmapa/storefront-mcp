@@ -235,8 +235,8 @@ async function runStdio(): Promise<void> {
       });
       return { resultType: 'complete', content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
-      // Unknown tool = invalid params on a method that exists (tools.mdx); same code as HTTP.
-      if (e instanceof UnknownToolError) throw new McpError(ErrorCode.InvalidParams, e.message);
+      // Same code the HTTP transports answer, and what this server has always answered.
+      if (e instanceof UnknownToolError) throw new McpError(ErrorCode.MethodNotFound, e.message);
       if (e instanceof ToolCallError) throw new McpError(e.code, e.message);
       throw new McpError(ErrorCode.InternalError, `Tool error: ${(e as Error).message}`);
     }

@@ -166,7 +166,7 @@ async function checkSkills(rawCall, mode, transport) {
   const noUriRead = await call('resources/read', {});
   assert.equal(noUriRead.error?.code, -32602, 'resources/read without uri → invalid params on this transport too');
   const badTool = await call('tools/call', { name: 'nope', arguments: {} });
-  assert.equal(badTool.error?.code, -32602, 'unknown tool → invalid params (tools.mdx), on this transport too');
+  assert.equal(badTool.error?.code, -32601, 'unknown tool → -32601, as this server always answered, on this transport too');
 
   const missing = await call('resources/read', { uri: 'skill://nope/SKILL.md' });
   assert.equal(missing.error?.code, modern ? -32602 : -32002, 'unknown resource → the code of the negotiated revision');
@@ -328,9 +328,9 @@ test('http: the 2026-07-28 validations — versions, _meta, mirrored headers, st
       assert.equal(j.error.code, -32602, `malformed _meta rejected: ${JSON.stringify(meta)}`);
     }
 
-    // An unknown tool is invalid params (tools.mdx), never a 404 "method not found".
+    // An unknown tool keeps -32601 but is never a 404: the method tools/call exists.
     j = await json(await s.post(s.stamped('tools/call', { name: 'nope', arguments: {} }), modernHeaders('tools/call', { name: 'nope' })), 200);
-    assert.equal(j.error.code, -32602);
+    assert.equal(j.error.code, -32601);
 
     // Cursors: every list is one page, on every list method.
     j = await json(await s.post({ jsonrpc: '2.0', id: 14, method: 'resources/list', params: { cursor: 'zzz' } }), 200);

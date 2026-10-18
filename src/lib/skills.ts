@@ -102,7 +102,7 @@ export function skillMarkdown(ctx: SkillContext): string {
   lines.push('');
   lines.push('- `stock: null` means unknown, not zero. Say "I cannot confirm stock", do not invent a number.');
   lines.push('- A result with an `error` field is an answer to act on (wrong slug, nothing found). A JSON-RPC error means the call itself was not acceptable and must not be retried in a loop.');
-  lines.push('- Error `-32602` with "Unknown tool": the tool does not exist on this deployment. Call tools/list; this server announces exactly the tools it can answer.');
+  lines.push('- Error `-32601`: the tool does not exist on this deployment. Call tools/list; this server announces exactly the tools it can answer.');
   lines.push('- Error `-32005`: you are calling the write tools too often. The quota is shared by both write tools, so switching between them does not reset it. Back off.');
   if (office.length > 0) lines.push('- Error `-32001`: that tool needs the operator credential your session carries; if it fails, the credential is wrong, do not retry with guesses.');
   lines.push('');

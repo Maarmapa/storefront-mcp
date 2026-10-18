@@ -153,6 +153,12 @@ export function acceptsEventStream(accept: string | string[] | null | undefined)
   return /\btext\/event-stream\b/i.test(a);
 }
 
+/** Every RPC method dispatch answers; anything else is "method not found". */
+export const IMPLEMENTED_METHODS: ReadonlySet<string> = new Set([
+  'server/discover', 'initialize', 'notifications/initialized', 'tools/list', 'tools/call',
+  'resources/list', 'resources/templates/list', 'resources/read', 'skills/list', 'skills/get', 'ping',
+]);
+
 /** The list methods this server answers. None of them ever issues `nextCursor`. */
 export const LIST_METHODS: ReadonlySet<string> = new Set(['tools/list', 'resources/list', 'resources/templates/list', 'skills/list']);
 export const CURSOR_MESSAGE =
@@ -552,7 +558,9 @@ export function httpStatusFor(req: JsonRpcRequest | null, response: unknown): nu
   const code = error.code;
   if (code === -32700 || code === -32600 || code === -32020 || code === -32021 || code === -32022) return 400;
   if (req && metaVersion(req) !== undefined) {
-    if (code === -32601) return 404;
+    // 404 means "this server does not implement that RPC method"; an unknown
+    // tool inside tools/call is -32601 too, but the method exists.
+    if (code === -32601 && !IMPLEMENTED_METHODS.has(req.method)) return 404;
     if (code === -32602 && metaProblemOf(req.params)) return 400;
   }
   return 200;
@@ -660,10 +668,11 @@ async function dispatch(req: JsonRpcRequest, authorized: boolean, ctx: CallConte
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         });
       } catch (e) {
-        // An unknown tool is invalid params on a method that exists (tools.mdx),
-        // not a missing method: -32601 is reserved for "this server does not
-        // implement that RPC method" and, on a modern request, turns into 404.
-        if (e instanceof UnknownToolError) return rpcError(req.id, -32602, e.message);
+        // -32601 for an unknown tool is what this server has always answered,
+        // and clients may rely on it, so it stays. It is NOT a missing RPC
+        // method, though: httpStatusFor only turns -32601 into 404 when the
+        // method itself is one dispatch does not implement.
+        if (e instanceof UnknownToolError) return rpcError(req.id, -32601, e.message);
         // Quota and capability refusals carry their own code so an agent can
         // tell "not acceptable, back off" from "here is a result you dislike".
         if (e instanceof ToolCallError) return rpcError(req.id, e.code, e.message);

@@ -323,7 +323,7 @@ the exact string `live` reaches live, so a typo fails towards doing nothing.
 tools.** `tools/list` is capability-gated end to end: no `getQuote`, no
 `get_quote`; no `OpsAdapter`, no back-office tools even for an authorized
 caller; no `CheckoutAdapter` *and* `InventoryAdapter` *and* pricing, no
-`create_checkout`. Anything not announced answers `-32602` ("Unknown tool"), the same way, for
+`create_checkout`. Anything not announced answers `-32601`, the same way, for
 every reason. *Without it:* you ship stubs. The WooCommerce adapter used to
 implement three methods it could not answer — `listBrands` returning `[]`,
 `getColorCard` returning `null`, `getQuote` rejecting every line — purely to
@@ -1052,7 +1052,7 @@ llega a live, así que un error de tipeo falla hacia no hacer nada.
 lectura.** `tools/list` está gateado por capacidad de punta a punta: sin
 `getQuote` no hay `get_quote`; sin `OpsAdapter` no hay tools de trastienda ni
 para un llamador autorizado; sin `CheckoutAdapter` *y* `InventoryAdapter` *y*
-cotizador no hay `create_checkout`. Lo que no se anuncia responde `-32602` ("Unknown tool"), de
+cotizador no hay `create_checkout`. Lo que no se anuncia responde `-32601`, de
 la misma forma, por cualquier motivo. *Sin esto:* despachas stubs. El adaptador
 de WooCommerce implementaba tres métodos que no podía responder — `listBrands`
 devolviendo `[]`, `getColorCard` devolviendo `null`, `getQuote` rechazando todo
