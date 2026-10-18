@@ -576,6 +576,62 @@ run it via `npx`. **Publish to npm first** — the registry validates the
 have yet creates an entry pointing at nothing. The workflow in
 `.github/workflows/publish-mcp-registry.yml` checks that before it runs.
 
+## Skills over MCP
+
+The server also ships the instructions for using it, as a skill served over the
+protocol ([SEP-2640](https://modelcontextprotocol.io/seps/2640-skills-extension),
+extension `io.modelcontextprotocol/skills`). A host that implements the extension
+discovers it with `skills/list`, reads `skill://storefront-mcp/SKILL.md` with
+`resources/read` and verifies the sha256 digest the entry carries. A host that
+does not implement it sees the same file as an ordinary resource; nothing breaks.
+
+The extension is specified against protocol revision 2026-07-28, so the server
+now answers `server/discover` and negotiates that revision (stateless, every
+request stamped with its version in `_meta`, `resultType` on every result,
+`ttlMs`/`cacheScope` on lists). Older clients keep using `initialize` with
+2025-06-18 or 2025-11-25 and notice nothing (`initialize` never answers
+2026-07-28: that revision has no handshake). The `server/discover` answer also
+carries `instructions` pointing at the skill, so a host without the extension
+(Claude Code today) still reads it as a resource when the model decides to.
+
+Speaking 2026-07-28 also means refusing what that revision tells servers to
+refuse: a `_meta` protocol version this server does not serve (-32022, with the
+supported list), a modern request without `clientCapabilities` (-32602), and on
+HTTP the mirrored headers `MCP-Protocol-Version`, `Mcp-Method` and `Mcp-Name`
+when they are missing or contradict the body (-32020, HTTP 400). An unknown
+method on a modern request is a 404. Requests that stamp no `_meta` (older
+revisions) are served as before.
+
+The SKILL.md is generated per caller from the deployment's real configuration:
+it names exactly the tools `tools/list` announces to that caller, states the
+current mode of each write tool (dry or live) and where an agent's permission
+ends (no checkout without an explicit request to buy, no alert without an
+address given for that purpose) and, for an operator session, which back-office
+tools it carries; an anonymous caller's skill never mentions them. Its
+digest therefore changes when the configuration does, which is the point: a host
+that pinned the digest re-reads it then.
+
+Try it with a client that speaks the extension (mcpc 0.7 or newer connects from
+a config file, like any MCP host):
+
+```bash
+cat > mcp.json <<'EOF'
+{ "mcpServers": { "shop": { "command": "npx", "args": ["-y", "storefront-mcp"] } } }
+EOF
+npx -y @apify/mcpc connect mcp.json:shop @shop
+npx -y @apify/mcpc @shop skills-list
+npx -y @apify/mcpc @shop skills-get storefront-mcp
+```
+
+`npm test` builds the CLI and exercises both transports end to end: capability
+declared, `skills/list` and `skills/get` agree, the frontmatter parses as YAML
+into the same fields as the entry (the verification hosts must do), digest and
+size match the bytes served, the skill names exactly the tools `tools/list`
+announces (in both directions), and an anonymous caller's skill never mentions
+the back office. It also covers the 2026-07-28 refusals above and the bodies
+that are not JSON-RPC requests (`null`, numbers, empty batches), which are
+answered with -32600 instead of executed.
+
 ## Serving MCP from your WordPress domain
 
 If your storefront runs WordPress/WooCommerce but the MCP server deploys
@@ -1201,6 +1257,64 @@ en npm**: el registro valida el `mcpName` dentro del tarball publicado, así que
 registrar una versión que npm todavía no tiene deja una entrada apuntando a
 nada. El workflow de `.github/workflows/publish-mcp-registry.yml` lo verifica
 antes de correr.
+
+## Skills over MCP
+
+El servidor también entrega sus propias instrucciones de uso como una skill
+servida por el protocolo ([SEP-2640](https://modelcontextprotocol.io/seps/2640-skills-extension),
+extensión `io.modelcontextprotocol/skills`). Un host que implementa la extensión
+la descubre con `skills/list`, lee `skill://storefront-mcp/SKILL.md` con
+`resources/read` y verifica el digest sha256 que trae la entrada. Un host que no
+la implementa ve el mismo archivo como un recurso común; nada se rompe.
+
+La extensión está especificada contra la revisión 2026-07-28 del protocolo, así
+que el servidor ahora responde `server/discover` y negocia esa revisión (sin
+estado, cada petición lleva su versión en `_meta`, `resultType` en cada
+resultado, `ttlMs`/`cacheScope` en las listas). Los clientes antiguos siguen
+usando `initialize` con 2025-06-18 o 2025-11-25 y no notan nada (`initialize`
+nunca responde 2026-07-28: esa revisión no tiene handshake). La respuesta de
+`server/discover` además trae `instructions` apuntando a la skill, para que un
+host sin la extensión (Claude Code hoy) la lea igual como recurso cuando el
+modelo lo decide.
+
+Hablar 2026-07-28 también es rechazar lo que esa revisión manda rechazar: una
+versión de protocolo en `_meta` que este servidor no sirve (-32022, con la lista
+de las que sí), una petición moderna sin `clientCapabilities` (-32602), y en
+HTTP las cabeceras espejo `MCP-Protocol-Version`, `Mcp-Method` y `Mcp-Name`
+cuando faltan o contradicen el cuerpo (-32020, HTTP 400). Un método desconocido
+en una petición moderna es un 404. Las peticiones que no estampan `_meta`
+(revisiones anteriores) se sirven como antes.
+
+El SKILL.md se genera por llamador desde la configuración real del despliegue:
+nombra exactamente las tools que `tools/list` le anuncia a ese llamador, dice el
+modo actual de cada tool de escritura (dry o live) y dónde termina el permiso de
+un agente (nada de checkout sin un pedido explícito de compra, nada de avisos sin
+una dirección entregada para eso) y, en una sesión de operador, qué tools de
+back-office trae; la skill de un llamador anónimo nunca las menciona. Por eso su
+digest cambia cuando cambia la configuración, que es la idea: un host que fijó
+el digest lo vuelve a leer entonces.
+
+Pruébalo con un cliente que hable la extensión (mcpc 0.7 o más nuevo se conecta
+desde un archivo de configuración, como cualquier host MCP):
+
+```bash
+cat > mcp.json <<'EOF'
+{ "mcpServers": { "tienda": { "command": "npx", "args": ["-y", "storefront-mcp"] } } }
+EOF
+npx -y @apify/mcpc connect mcp.json:tienda @tienda
+npx -y @apify/mcpc @tienda skills-list
+npx -y @apify/mcpc @tienda skills-get storefront-mcp
+```
+
+`npm test` compila la CLI y prueba los dos transportes de punta a punta:
+capacidad declarada, `skills/list` y `skills/get` coinciden, el frontmatter se
+parsea como YAML a los mismos campos de la entrada (la verificación que los
+hosts tienen que hacer), digest y tamaño calzan con los bytes servidos, la skill
+nombra exactamente las tools que `tools/list` anuncia (en los dos sentidos), y
+la skill de un llamador anónimo nunca menciona el back-office. También cubre los
+rechazos de 2026-07-28 de arriba y los cuerpos que no son peticiones JSON-RPC
+(`null`, números, lotes vacíos), que se responden con -32600 en vez de
+ejecutarse.
 
 ## MCP bajo tu dominio WordPress
 
