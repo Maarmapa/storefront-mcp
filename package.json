@@ -1,6 +1,6 @@
 {
   "name": "storefront-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "MCP server template for e-commerce storefronts: public catalog tools for AI agents, guarded write tools (checkout, back-in-stock alerts), token-gated back-office tools for you. Runs standalone via `npx storefront-mcp` (stdio) or as a Next.js App Router route.",
   "keywords": [
     "mcp",
@@ -34,10 +34,12 @@
     "build:cli": "tsc -p tsconfig.build.json",
     "prepack": "npm run build:cli",
     "prepublishOnly": "npm run typecheck && npm run build:cli",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build:cli && node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.17.0"
+    "@modelcontextprotocol/sdk": "^1.17.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -45,7 +47,8 @@
     "next": "^15.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "yaml": "^2.8.1"
   },
   "mcpName": "io.github.Maarmapa/storefront-mcp"
 }

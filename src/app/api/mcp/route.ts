@@ -15,13 +15,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { resolveCallerFromHeaders } from '@/lib/client-ip';
-import {
-  discoveryDescriptor,
-  handleRequest,
-  isAuthorizedHeader,
-  rpcError,
-  type JsonRpcRequest,
-} from '@/lib/protocol';
+import { acceptsEventStream, discoveryDescriptor, handleHttpBody, isAuthorizedHeader, rpcError } from '@/lib/protocol';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -34,7 +28,7 @@ export const dynamic = 'force-dynamic';
 export const maxDuration = 15;
 
 export async function POST(req: NextRequest) {
-  let body: JsonRpcRequest | JsonRpcRequest[];
+  let body: unknown;
   try {
     body = await req.json();
   } catch {
@@ -59,19 +53,25 @@ export async function POST(req: NextRequest) {
   // limit turns into decoration.
   const ctx = resolveCallerFromHeaders(req.headers);
 
-  if (Array.isArray(body)) {
-    const responses = (
-      await Promise.all(body.map(b => handleRequest(b, authorized, ctx)))
-    ).filter(r => r !== null);
-    return NextResponse.json(responses);
-  }
-  const result = await handleRequest(body, authorized, ctx);
-  if (result === null) return new Response(null, { status: 202 });
-  return NextResponse.json(result);
+  // Shape check, 2026-07-28 header validation (MCP-Protocol-Version,
+  // Mcp-Method, Mcp-Name), dispatch and HTTP status: one function, shared
+  // with the CLI's --http mode so the two transports cannot disagree.
+  const reply = await handleHttpBody(body, name => req.headers.get(name) ?? undefined, authorized, ctx);
+  if (reply === null) return new Response(null, { status: 202 });
+  return NextResponse.json(reply.payload, { status: reply.status });
 }
 
 // Discovery: GET returns metadata so clients (and curious humans) can verify
 // the endpoint without speaking JSON-RPC. Only public tool names are listed.
-export async function GET() {
+export async function GET(req: NextRequest) {
+  // A 2025-revision client asking for text/event-stream is opening the
+  // server→client stream; this route opens none, and the transport's answer
+  // for that is 405. Anyone else gets the discovery descriptor.
+  if (acceptsEventStream(req.headers.get('accept'))) {
+    return NextResponse.json(
+      rpcError(null, -32600, 'This server opens no server-to-client stream; POST JSON-RPC requests instead'),
+      { status: 405, headers: { allow: 'POST' } },
+    );
+  }
   return NextResponse.json(discoveryDescriptor('streamable-http'));
 }

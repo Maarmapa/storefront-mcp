@@ -7,13 +7,13 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Maarmapa/storefront-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "storefront-mcp",
-      "version": "2.0.0",
+      "version": "2.1.0",
       "transport": {
         "type": "stdio"
       },

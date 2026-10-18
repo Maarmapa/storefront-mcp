@@ -1,11 +1,12 @@
 {
-  "$comment": "Template for /.well-known/mcp.json \u2014 replace {{DOMAIN}} and serve it from your site root (Next.js: put the rendered file in public/.well-known/mcp.json). It lets crawlers and agent frameworks discover your MCP endpoint without guessing. Only list PUBLIC tools here: sensitive tools should not appear in discovery documents. And only list tools your deployment actually announces \u2014 every tool below depends on a capability your adapter may not implement (variant charts, quoting, checkout, alerts), so trim this list to what `tools/list` really returns.",
+  "$comment": "Template for /.well-known/mcp.json — replace {{DOMAIN}} and serve it from your site root (Next.js: put the rendered file in public/.well-known/mcp.json). It lets crawlers and agent frameworks discover your MCP endpoint without guessing. Only list PUBLIC tools here: sensitive tools should not appear in discovery documents. And only list tools your deployment actually announces — every tool below depends on a capability your adapter may not implement (variant charts, quoting, checkout, alerts), so trim this list to what `tools/list` really returns.",
   "name": "storefront-mcp",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Storefront catalog over MCP: products, variant charts with per-variant stock, promotions, quotes, guarded checkout and back-in-stock alerts.",
   "endpoint": "https://{{DOMAIN}}/api/mcp",
   "transport": "streamable-http",
-  "protocolVersion": "2025-06-18",
+  "protocolVersion": "2026-07-28",
+  "supportedVersions": ["2026-07-28", "2025-11-25", "2025-06-18"],
   "authentication": {
     "public_tools": "none",
     "sensitive_tools": "bearer"
@@ -21,5 +22,11 @@
     "subscribe_stock_alert"
   ],
   "docs": "https://{{DOMAIN}}/llms.txt",
-  "contact": "https://{{DOMAIN}}/contact"
+  "contact": "https://{{DOMAIN}}/contact",
+  "extensions": [
+    "io.modelcontextprotocol/skills"
+  ],
+  "skills": [
+    "skill://storefront-mcp/SKILL.md"
+  ]
 }
