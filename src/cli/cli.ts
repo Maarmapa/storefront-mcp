@@ -25,13 +25,8 @@
 import { createServer as createHttpServer } from 'node:http';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ErrorCode,
-  ListToolsRequestSchema,
-  McpError,
-  type Tool,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ErrorCode, McpError, type ServerResult, type Tool } from '@modelcontextprotocol/sdk/types.js';
+import { z } from 'zod';
 import { getAdapters } from '../lib/adapters';
 import { resolveCallerFromNode, trustedProxyHeader } from '../lib/client-ip';
 import { confirmUrlBase, signingSecretState } from '../lib/optin';
@@ -41,16 +36,26 @@ import {
   discoveryDescriptor,
   getServerDescription,
   getServerName,
-  handleRequest,
   isAuthorizedHeader,
   PROTOCOL_VERSION,
   rpcError,
+  SERVER_INSTRUCTIONS,
   SERVER_VERSION,
+  cacheable,
+  discoverResult,
+  acceptsEventStream,
+  CURSOR_MESSAGE,
+  handleHttpBody,
+  hasCursor,
+  metaProblemOf,
+  metaVersionOf,
+  RESOURCE_TTL_MS,
+  skillContext,
   ToolCallError,
   UnknownToolError,
   visibleTools,
-  type JsonRpcRequest,
 } from '../lib/protocol';
+import { readSkillResource, SKILL_URI, SKILLS_EXTENSION, skillEntry, skillResourceList } from '../lib/skills';
 import { SENSITIVE_TOOLS } from '../lib/tools';
 import { checkoutMode, stockAlertMode, unreservedCheckoutPolicy } from '../lib/write-mode';
 
@@ -178,16 +183,45 @@ async function runStdio(): Promise<void> {
 
   const server = new Server(
     { name: getServerName(), version: SERVER_VERSION, description: getServerDescription() },
-    { capabilities: { tools: {} } },
+    // `resources` + the skills extension: the server ships its own instructions
+    // as a skill (SEP-2640, src/lib/skills.ts), same as the HTTP transports.
+    {
+      capabilities: { tools: {}, resources: {}, extensions: { [SKILLS_EXTENSION]: {} } },
+      instructions: SERVER_INSTRUCTIONS,
+    },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    // Same boundary as the HTTP route: unauthorized callers never even see
-    // the sensitive tools.
-    tools: visibleTools(authorized) as unknown as Tool[],
-  }));
+  // 2026-07-28 `_meta` on stdio too: a version this server does not serve is
+  // refused with the list it does, a modern request without clientCapabilities
+  // is malformed. Same function the HTTP transports run.
+  const checkMeta = (params: unknown) => {
+    const problem = metaProblemOf(params);
+    if (problem) throw new McpError(problem.code, problem.message, problem.data);
+  };
+
+  // Request schemas with `method` fixed and `params` any object: a missing or
+  // mistyped field is OUR -32602 with a message, not the SDK's -32603 wrapping
+  // a zod dump, so stdio answers the same request the same way HTTP does.
+  const loose = <M extends string>(method: M) =>
+    z.object({ method: z.literal(method), params: z.object({}).passthrough().optional() });
+  const rejectCursor = (params: unknown) => {
+    if (hasCursor(params)) throw new McpError(ErrorCode.InvalidParams, CURSOR_MESSAGE);
+  };
+
+  server.setRequestHandler(loose('tools/list'), async req => {
+    checkMeta(req.params);
+    rejectCursor(req.params);
+    return {
+      // Same boundary as the HTTP route: unauthorized callers never even see
+      // the sensitive tools.
+      resultType: 'complete',
+      ...cacheable(authorized),
+      tools: visibleTools(authorized) as unknown as Tool[],
+    } as unknown as ServerResult;
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async req => {
+    checkMeta(req.params);
     const name = req.params.name;
     if (SENSITIVE_TOOLS.has(name) && !authorized) {
       throw new McpError(-32001, `Tool '${name}' requires authentication (set MCP_SECRET in the env)`);
@@ -199,12 +233,76 @@ async function runStdio(): Promise<void> {
         clientKey: 'stdio',
         attributed: true,
       });
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      return { resultType: 'complete', content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (e) {
+      // Same code the HTTP transports answer, and what this server has always answered.
       if (e instanceof UnknownToolError) throw new McpError(ErrorCode.MethodNotFound, e.message);
       if (e instanceof ToolCallError) throw new McpError(e.code, e.message);
       throw new McpError(ErrorCode.InternalError, `Tool error: ${(e as Error).message}`);
     }
+  });
+
+  // ───────── Skills over MCP (SEP-2640) ─────────
+  // The SDK's result union does not know the extension's two methods, so their
+  // results are cast; the wire shape is the one the extension specifies.
+  // The SDK itself still negotiates up to 2025-11-25 through `initialize`.
+  // server/discover is answered here so a 2026-07-28 client (the revision the
+  // Skills extension needs) can pick that version and go stateless; the
+  // handlers below are the same code on either path.
+  const ServerDiscoverRequestSchema = z.object({
+    method: z.literal('server/discover'),
+    params: z.object({}).passthrough().optional(),
+  });
+  server.setRequestHandler(ServerDiscoverRequestSchema, async req => {
+    checkMeta(req.params);
+    return discoverResult() as unknown as ServerResult;
+  });
+  server.setRequestHandler(loose('resources/list'), async req => {
+    checkMeta(req.params);
+    rejectCursor(req.params);
+    return { resultType: 'complete', ...cacheable(authorized), resources: skillResourceList() } as unknown as ServerResult;
+  });
+  server.setRequestHandler(loose('resources/templates/list'), async req => {
+    checkMeta(req.params);
+    rejectCursor(req.params);
+    return { resultType: 'complete', ...cacheable(false), resourceTemplates: [] } as unknown as ServerResult;
+  });
+  server.setRequestHandler(loose('resources/read'), async req => {
+    checkMeta(req.params);
+    const uri = req.params?.uri;
+    if (typeof uri !== 'string') throw new McpError(ErrorCode.InvalidParams, 'Invalid params: resources/read requires params.uri');
+    const file = readSkillResource(uri, skillContext(authorized));
+    if (!file) {
+      // -32602 since 2026-07-28, -32002 before: pick by the version the caller stamped.
+      const modern = metaVersionOf(req.params) === '2026-07-28';
+      throw new McpError(modern ? -32602 : -32002, `Resource not found: ${uri}`);
+    }
+    return { resultType: 'complete', ...cacheable(authorized, RESOURCE_TTL_MS), contents: [file] } as unknown as ServerResult;
+  });
+  const SkillsGetRequestSchema = loose('skills/get');
+  server.setRequestHandler(loose('skills/list'), async req => {
+    checkMeta(req.params);
+    rejectCursor(req.params);
+    return {
+      resultType: 'complete',
+      ...cacheable(authorized),
+      skills: [skillEntry(skillContext(authorized))],
+    } as unknown as ServerResult;
+  });
+  server.setRequestHandler(SkillsGetRequestSchema, async req => {
+    checkMeta(req.params);
+    const uri = req.params?.uri;
+    if (typeof uri !== 'string') {
+      throw new McpError(ErrorCode.InvalidParams, 'Invalid params: skills/get requires params.uri (the SKILL.md URI)');
+    }
+    if (uri !== SKILL_URI) {
+      throw new McpError(ErrorCode.InvalidParams, `Unknown skill: ${uri}. This server serves ${SKILL_URI}.`);
+    }
+    return {
+      resultType: 'complete',
+      ...cacheable(authorized),
+      skill: skillEntry(skillContext(authorized)),
+    } as unknown as ServerResult;
   });
 
   await server.connect(new StdioServerTransport());
@@ -275,6 +373,14 @@ function runHttp(port: number, host: string): void {
     }
 
     if (req.method === 'GET') {
+      // A 2025-revision client asking for text/event-stream is opening the
+      // server→client stream; this server opens none, and the transport's
+      // answer for that is 405. Anyone else gets the discovery descriptor.
+      if (acceptsEventStream(req.headers.accept)) {
+        res.writeHead(405, { 'content-type': 'application/json', allow: 'POST' });
+        res.end(JSON.stringify(rpcError(null, -32600, 'This server opens no server-to-client stream; POST JSON-RPC requests instead')));
+        return;
+      }
       sendJson(200, discoveryDescriptor('http'));
       return;
     }
@@ -283,7 +389,7 @@ function runHttp(port: number, host: string): void {
       return;
     }
 
-    let body: JsonRpcRequest | JsonRpcRequest[];
+    let body: unknown;
     try {
       body = JSON.parse(await readBody(req));
     } catch {
@@ -300,24 +406,24 @@ function runHttp(port: number, host: string): void {
     // because with no proxy they are just text the caller typed.
     const ctx = resolveCallerFromNode(req.headers, req.socket.remoteAddress);
 
-    if (Array.isArray(body)) {
-      const responses = (
-        await Promise.all(body.map(b => handleRequest(b, authorized, ctx)))
-      ).filter(r => r !== null);
-      sendJson(200, responses);
-      return;
-    }
-    const result = await handleRequest(body, authorized, ctx);
-    if (result === null) {
+    // Shape check, 2026-07-28 header validation (MCP-Protocol-Version,
+    // Mcp-Method, Mcp-Name), dispatch and HTTP status, shared with the Next
+    // route so the two cannot disagree. Node lowercases header names.
+    const header = (name: string) => {
+      const v = req.headers[name];
+      return Array.isArray(v) ? v[0] : v;
+    };
+    const reply = await handleHttpBody(body, header, authorized, ctx);
+    if (reply === null) {
       res.writeHead(202);
       res.end();
       return;
     }
-    sendJson(200, result);
+    sendJson(reply.status, reply.payload);
   });
 
   server.listen(port, host, () => {
-    log(`HTTP ready on http://${host}:${port} — protocol ${PROTOCOL_VERSION}`);
+    log(`HTTP ready on http://${host}:${port} — protocol ${PROTOCOL_VERSION} (and 2026-07-28 via server/discover)`);
     log(`opt-in confirmation page: http://${host}:${port}${CONFIRM_PATH}`);
     log(
       `adapter=${process.env.CATALOG_ADAPTER || 'memory'}, sensitive tools ` +
