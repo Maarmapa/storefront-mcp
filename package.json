@@ -33,9 +33,9 @@
     "start": "next start",
     "build:cli": "tsc -p tsconfig.build.json",
     "prepack": "npm run build:cli",
-    "prepublishOnly": "npm run typecheck && npm run build:cli",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build:cli",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build:cli && node --test \"test/**/*.test.mjs\""
+    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/tests/*.test.js\" && npm run build:cli && node --test \"test/**/*.test.mjs\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.0",
