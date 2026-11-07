@@ -42,10 +42,17 @@ export interface ClientWarning {
   message: string;
 }
 
-/** Where a projected document came from. No hosts, payloads, or credentials. */
+/**
+ * Where a projected document came from. No hosts, payloads, or credentials.
+ * `partitionRef` names the transport identity (an opaque label or an endpoint
+ * fingerprint). `authScope` is `anonymous` because this profile does not send
+ * a credential. `cacheScope` is not part of this block: it is not a grant.
+ */
 export interface Provenance {
   sourceKind: 'mcp' | 'client-cache' | 'client-policy';
   sourceRef: string;
+  partitionRef: string;
+  authScope: 'anonymous';
   adapterVersion: string | null;
 }
 

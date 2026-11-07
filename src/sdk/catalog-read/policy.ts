@@ -46,6 +46,13 @@ export const VARIANTS_UNSUPPORTED_MESSAGE =
 export const CAPABILITY_UNKNOWN_MESSAGE =
   'The server tool manifest could not be read, so this operation stays unknown. It was not called and it was not marked unsupported for every source.';
 
+export const MANIFEST_REDIRECT_MESSAGE =
+  'The server tool manifest could not be read because the endpoint redirected and the redirect was not followed. ' +
+  'Capabilities stay unknown. The redirect target was not requested, and this operation was not marked unsupported for every source.';
+
+/** This profile sends no credential. The label is a cache partition, not a token. */
+export const READ_AUTH_SCOPE = 'anonymous' as const;
+
 /** Same ceiling as cart.ts MAX_UNITS_PER_PRODUCT. Rejected, never clamped. */
 export const MAX_LINE_QTY = 50;
 

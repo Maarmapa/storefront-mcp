@@ -15,11 +15,15 @@ import { MAX_UNITS_PER_PRODUCT } from '../src/lib/cart';
 import { handleRequest } from '../src/lib/protocol';
 import {
   CatalogReadClient,
+  MemoryReadCache,
   MAX_LINE_QTY,
+  READ_AUTH_SCOPE,
   READ_TOOL_ALLOWLIST,
+  assertPartitionRef,
   assertReadEndpoint,
   createHttpTransport,
   isAllowlistedReadTool,
+  type CacheRecord,
   type ReadTransport,
   type RpcRequest,
   type RpcResponse,
@@ -48,10 +52,11 @@ interface Effects {
   documents: number;
 }
 
-function scripted(handler: (request: RpcRequest) => RpcResponse | Promise<RpcResponse>) {
+function scripted(handler: (request: RpcRequest) => RpcResponse | Promise<RpcResponse>, partitionRef = 'synthetic-fixture') {
   const calls: RpcRequest[] = [];
   const effects: Effects = { orders: 0, paymentLinks: 0, holds: 0, emails: 0, subscriptions: 0, documents: 0 };
   const transport: ReadTransport = {
+    partitionRef,
     async send(request) {
       calls.push(request);
       const name = request.method === 'tools/call' ? String((request.params as { name?: unknown })?.name ?? '') : '';
@@ -65,7 +70,11 @@ function scripted(handler: (request: RpcRequest) => RpcResponse | Promise<RpcRes
         effects.emails += 1;
         effects.subscriptions += 1;
       }
-      return handler(request);
+      const response = await handler(request);
+      if (response.body && typeof response.body === 'object' && !Array.isArray(response.body)) {
+        return { ...response, body: { ...(response.body as Record<string, unknown>), id: request.id } };
+      }
+      return response;
     },
   };
   return { calls, effects, transport };
@@ -488,14 +497,14 @@ describe('catalog read profile', () => {
         rpc: body.method,
       });
       if (body.method === 'tools/list') {
-        return new Response(JSON.stringify({ jsonrpc: '2.0', id: '1', result: { tools: [{ name: 'search_products' }, { name: 'get_product' }] } }), {
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { tools: [{ name: 'search_products' }, { name: 'get_product' }] } }), {
           status: 200,
         });
       }
       return new Response(
         JSON.stringify({
           jsonrpc: '2.0',
-          id: '1',
+          id: body.id,
           result: { content: [{ type: 'text', text: JSON.stringify({ query: 'marker', total: 0, results: [] }) }] },
         }),
         { status: 200 },
@@ -528,6 +537,7 @@ describe('catalog read profile', () => {
     );
     const bounced = await new CatalogReadClient({ transport: redirected }).readCapabilities();
     assert.equal(bounced.errors[0]?.code, 'CAPABILITY_UNKNOWN');
+    assert.match(bounced.errors[0]?.message ?? '', /redirect was not followed/);
     assert.equal(JSON.stringify(bounced).includes('169.254.169.254'), false);
   });
 
@@ -539,6 +549,7 @@ describe('catalog read profile', () => {
     const calls: string[] = [];
     const effects: Effects = { orders: 0, paymentLinks: 0, holds: 0, emails: 0, subscriptions: 0, documents: 0 };
     const transport: ReadTransport = {
+      partitionRef: 'demo-memory',
       async send(request) {
         const name = toolName(request);
         calls.push(name);
@@ -592,6 +603,259 @@ describe('catalog read profile', () => {
     assert.ok(calls.includes('search_products'));
     assert.ok(calls.includes('get_product'));
     assert.ok(calls.includes('get_variant_chart'));
+  });
+
+  it('shared cache does not cross stores, tenants, or adapter versions', async () => {
+    const cache = new MemoryReadCache();
+    const searchOf = (slug: string) =>
+      tool({
+        query: 'marker',
+        total: 1,
+        results: [{ slug, name: slug, brand: null, price: 5900, currency: 'CLP' }],
+      });
+    const shop = (partitionRef: string, slug: string) => {
+      const gateway = scripted(request => {
+        if (request.method === 'tools/list') return tools(['search_products', 'get_product']);
+        return searchOf(slug);
+      }, partitionRef);
+      const client = new CatalogReadClient({ transport: gateway.transport, cache });
+      return { gateway, client };
+    };
+
+    const a = shop('store-a', 'from-a');
+    const b = shop('store-b', 'from-b');
+    const foundA = await a.client.searchProducts({ query: 'marker', cacheScope: 'public' });
+    const foundB = await b.client.searchProducts({ query: 'marker', cacheScope: 'public' });
+    assert.equal(foundA.data?.items[0]?.productRef, 'from-a');
+    assert.equal(foundB.data?.items[0]?.productRef, 'from-b');
+    assert.equal(foundA.provenance.partitionRef, 'store-a');
+    assert.equal(foundB.provenance.partitionRef, 'store-b');
+    assert.equal(foundA.provenance.authScope, READ_AUTH_SCOPE);
+    assert.match(foundA.provenance.sourceRef, /^tool:search_products#store-a$/);
+    assert.equal(foundA.provenance.sourceRef.includes('shop-a'), false);
+    assert.deepEqual(
+      b.gateway.calls.map(toolName),
+      ['tools/list', 'search_products'],
+    );
+    const quote = await b.client.quoteCart({ lines: [{ variantRef: 'SYN', qty: 1 }], currency: 'CLP' });
+    assert.equal(quote.errors[0]?.code, 'UNSUPPORTED');
+    assert.equal(b.gateway.calls.some(call => toolName(call) === 'get_quote'), false);
+    assert.equal(JSON.stringify(foundB).includes('bearer'), false);
+
+    let version = '1.0.0';
+    let slug = 'version-1';
+    const versioned = scripted(request => {
+      if (request.method === 'tools/list') {
+        return rpc({
+          tools: [{ name: 'search_products', description: SYNTHETIC, inputSchema: { type: 'object' } }],
+          _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'fixture', version } },
+        });
+      }
+      return searchOf(slug);
+    }, 'store-versioned');
+    const first = new CatalogReadClient({ transport: versioned.transport, cache });
+    const second = new CatalogReadClient({ transport: versioned.transport, cache });
+    assert.equal((await first.searchProducts({ query: 'marker', cacheScope: 'public' })).data?.items[0]?.productRef, 'version-1');
+    version = '2.0.0';
+    slug = 'version-2';
+    const next = await second.searchProducts({ query: 'marker', cacheScope: 'public' });
+    assert.equal(next.data?.items[0]?.productRef, 'version-2');
+    assert.equal(next.provenance.adapterVersion, '2.0.0');
+    assert.equal(versioned.calls.filter(call => toolName(call) === 'search_products').length, 2);
+  });
+
+  it('http partitions by canonical endpoint and public tenant label, not by a bearer or cacheScope', async () => {
+    const calls: string[] = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: string; method: string };
+      calls.push(`${url} ${body.method}`);
+      const slug = url.includes('/shops/a') ? 'path-a' : 'path-b';
+      const result =
+        body.method === 'tools/list'
+          ? { tools: [{ name: 'search_products' }, { name: 'get_product' }] }
+          : { content: [{ type: 'text', text: JSON.stringify({ query: 'marker', total: 1, results: [{ slug, name: slug, brand: null, price: 5900 }] }) }] };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200 });
+    };
+    const cache = new MemoryReadCache();
+    const left = createHttpTransport('https://Shop.Example:443/shops/a/', fetchImpl);
+    const right = createHttpTransport('https://shop.example/shops/b', fetchImpl);
+    assert.notEqual(left.partitionRef, right.partitionRef);
+    assert.equal(left.partitionRef.includes('shop.example'), false);
+    assert.equal(left.partitionRef.startsWith('ep_'), true);
+    const clientA = new CatalogReadClient({ transport: left, cache });
+    const clientB = new CatalogReadClient({ transport: right, cache });
+    const docA = await clientA.searchProducts({ query: 'marker', cacheScope: 'public' });
+    const docB = await clientB.searchProducts({ query: 'marker', cacheScope: 'public' });
+    assert.equal(docA.data?.items[0]?.productRef, 'path-a');
+    assert.equal(docB.data?.items[0]?.productRef, 'path-b');
+    assert.equal(JSON.stringify(docA).includes('shop.example'), false);
+    assert.equal(JSON.stringify(docA).includes('Shop.Example'), false);
+    assert.equal(calls.filter(call => call.endsWith('tools/call')).length, 2);
+
+    const sameA = createHttpTransport('https://Shop.Example:443/api/mcp/', fetchImpl);
+    const sameB = createHttpTransport('https://shop.example/api/mcp?b=1&a=2', fetchImpl);
+    const sameC = createHttpTransport('https://shop.example/api/mcp?a=2&b=1', fetchImpl);
+    assert.equal(sameB.partitionRef, sameC.partitionRef);
+    assert.notEqual(sameA.partitionRef, sameB.partitionRef);
+
+    const privateHost = createHttpTransport('http://10.1.2.3/internal/mcp', fetchImpl);
+    assert.equal(privateHost.partitionRef.includes('10.1.2.3'), false);
+    assert.equal(privateHost.partitionRef.includes('internal'), false);
+    assert.throws(() => createHttpTransport('https://shop.example/api/mcp', fetchImpl, { partitionRef: 'Bearer-super-secret-token' }), TypeError);
+    assert.throws(() => assertPartitionRef('10.4.4.4'), TypeError);
+    let thrown = '';
+    try {
+      assertPartitionRef('Bearer-super-secret-token');
+    } catch (error) {
+      thrown = error instanceof Error ? error.message : '';
+    }
+    assert.equal(thrown.includes('super-secret-token'), false);
+
+    let n = 0;
+    const tenantFetch = async (url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: string; method: string };
+      const headers = init.headers as Record<string, string>;
+      assert.equal(headers.authorization ?? headers.Authorization, undefined);
+      const slug = body.method === 'tools/call' ? `tenant-${++n}` : 'unused';
+      const result =
+        body.method === 'tools/list'
+          ? { tools: [{ name: 'search_products' }] }
+          : { content: [{ type: 'text', text: JSON.stringify({ query: 'marker', total: 1, results: [{ slug, name: slug, brand: null, price: 1 }] }) }] };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200 });
+    };
+    const sharedUrl = 'https://shop.example/api/mcp';
+    const tenantCache = new MemoryReadCache();
+    const tenantA = new CatalogReadClient({
+      transport: createHttpTransport(sharedUrl, tenantFetch, { partitionRef: 'tenant-a' }),
+      cache: tenantCache,
+    });
+    const tenantB = new CatalogReadClient({
+      transport: createHttpTransport(sharedUrl, tenantFetch, { partitionRef: 'tenant-b' }),
+      cache: tenantCache,
+    });
+    const ta = await tenantA.searchProducts({ query: 'marker', cacheScope: 'public' });
+    const tb = await tenantB.searchProducts({ query: 'marker', cacheScope: 'public' });
+    assert.equal(ta.data?.items[0]?.productRef, 'tenant-1');
+    assert.equal(tb.data?.items[0]?.productRef, 'tenant-2');
+    assert.equal(ta.provenance.authScope, 'anonymous');
+    assert.notEqual(ta.provenance.partitionRef, tb.provenance.partitionRef);
+    assert.equal(JSON.stringify(ta).includes(sharedUrl), false);
+
+    const anonCache = new MemoryReadCache();
+    let anonSearches = 0;
+    const anonFetch = async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as { id: string; method: string };
+      if (body.method === 'tools/call') anonSearches += 1;
+      const result =
+        body.method === 'tools/list'
+          ? { tools: [{ name: 'search_products' }] }
+          : {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify({
+                    query: 'marker',
+                    total: 1,
+                    results: [{ slug: 'anon-product', name: 'Anon', brand: null, price: 1 }],
+                  }),
+                },
+              ],
+            };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200 });
+    };
+    const anonA = new CatalogReadClient({ transport: createHttpTransport(sharedUrl, anonFetch), cache: anonCache });
+    const anonB = new CatalogReadClient({ transport: createHttpTransport(sharedUrl, anonFetch), cache: anonCache });
+    assert.equal((await anonA.searchProducts({ query: 'marker', cacheScope: 'public' })).data?.items[0]?.productRef, 'anon-product');
+    const anonHit = await anonB.searchProducts({ query: 'marker', cacheScope: 'public' });
+    assert.equal(anonHit.data?.items[0]?.productRef, 'anon-product');
+    assert.equal(anonHit.provenance.sourceKind, 'client-cache');
+    assert.equal(anonSearches, 1);
+  });
+
+  it('discards a mismatched JSON-RPC id and aborts during retry sleep', async () => {
+    const mismatch: ReadTransport = {
+      partitionRef: 'mismatch',
+      async send() {
+        return { status: 200, body: { jsonrpc: '2.0', id: 'someone-else', result: { tools: [{ name: 'search_products' }] } }, retryAfterMs: null };
+      },
+    };
+    const mismatched = await new CatalogReadClient({ transport: mismatch }).searchProducts({ query: 'marker' });
+    assert.equal(mismatched.errors[0]?.code, 'CONTRACT_MISMATCH');
+    assert.match(mismatched.errors[0]?.message ?? '', /response id/);
+    assert.equal(mismatched.data, null);
+    assert.equal(JSON.stringify(mismatched).includes('someone-else'), false);
+
+    const ac = new AbortController();
+    let searches = 0;
+    let enteredSleep: () => void = () => undefined;
+    const entered = new Promise<void>(resolve => {
+      enteredSleep = resolve;
+    });
+    const gateway = scripted(request => {
+      if (request.method === 'tools/list') return tools(['search_products', 'get_product']);
+      searches += 1;
+      return { status: 503, body: null, retryAfterMs: null };
+    }, 'retry-abort');
+    const client = new CatalogReadClient({
+      transport: gateway.transport,
+      retry: { maxAttempts: 3, backoffMs: 1000 },
+      sleep: () => {
+        enteredSleep();
+        return new Promise(() => undefined);
+      },
+    });
+    const pending = client.searchProducts({ query: 'marker', signal: ac.signal });
+    await entered;
+    ac.abort();
+    const cancelled = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('abort did not interrupt retry sleep')), 500)),
+    ]);
+    assert.equal(cancelled.errors[0]?.code, 'CANCELLED_LOCAL');
+    assert.equal(searches, 1);
+    assert.equal(gateway.calls.filter(call => toolName(call) === 'get_quote').length, 0);
+  });
+
+  it('an aged cache hit without a freshness policy is partial, and the map is bounded', async () => {
+    let nowMs = Date.parse('2026-11-01T00:00:00.000Z');
+    const gateway = scripted(request => {
+      if (request.method === 'tools/list') return tools(['search_products', 'get_product']);
+      const query = String((request.params as { arguments?: { query?: string } }).arguments?.query);
+      return tool({ query, total: 1, results: [{ slug: query, name: query, brand: null, price: 1 }] });
+    }, 'aged');
+    const client = new CatalogReadClient({
+      transport: gateway.transport,
+      now: () => new Date(nowMs),
+      maxCacheEntries: 1,
+    });
+    const first = await client.searchProducts({ query: 'one' });
+    nowMs += 10 * 24 * 60 * 60 * 1000;
+    const second = await client.searchProducts({ query: 'one' });
+    assert.equal(second.status, 'partial');
+    assert.equal(second.observation.cacheFreshness, 'unknown');
+    assert.equal(second.observation.fetchedAt, first.observation.fetchedAt);
+    assert.equal(second.warnings.some(warning => warning.code === 'CACHE_AGE_UNCERTIFIED'), true);
+    assert.equal(gateway.calls.filter(call => toolName(call) === 'search_products').length, 1);
+
+    const bounded = new MemoryReadCache(1);
+    const record = {
+      storedAtMs: 1,
+      fetchedAt: '2026-11-01T00:00:00.000Z',
+      upstreamObservedAt: null,
+      sourceUpdatedAt: null,
+      adapterVersion: null,
+      sourceRef: 'tool:search_products#aged',
+      partitionRef: 'aged',
+      authScope: READ_AUTH_SCOPE,
+      data: { query: 'x', items: [], reportedCount: 0, nextCursor: null },
+      components: first.components,
+      warnings: [],
+      partial: false,
+    } satisfies CacheRecord;
+    bounded.set('a', record);
+    bounded.set('b', { ...record, sourceRef: 'tool:search_products#other' });
+    assert.equal(bounded.get('a'), undefined);
+    assert.equal(bounded.get('b')?.partitionRef, 'aged');
   });
 
   it('the client sources do not touch browser storage, cookies, or server secrets', () => {

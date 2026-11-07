@@ -58,7 +58,7 @@ const quote = await client.quoteCart({
 
 The endpoint is fixed on the transport. A per-call `endpoint`, `unitPrice`, `role`, or `currency` on search is `INVALID_ARGUMENT` and is not stripped and ignored. `currency` on `quoteCart` is accepted as a requested context and still produces no converted total.
 
-Cache is a `Map` in the client. `cacheScope` only partitions that map. It is not sent to the server and it is not a tenant grant. A later hit reuses `fetchedAt`, `upstreamObservedAt`, and `sourceUpdatedAt` from the first response. `expiresAt` is always null.
+Cache entries are keyed by transport identity, the fixed auth scope `anonymous`, adapter version, operation, `cacheScope`, and arguments. `cacheScope` only partitions that map inside one identity. It is not sent to the server and it is not a tenant grant. Two stores in one process need different `partitionRef` values. `createHttpTransport` derives one from a canonical endpoint fingerprint and does not put the host or a bearer in the cache record or in provenance. An optional `partitionRef` on that helper is an extra public label for two tenants on the same URL, because this client has no credential to tell them apart. A later hit reuses `fetchedAt`, `upstreamObservedAt`, and `sourceUpdatedAt`. Without `staleAfterMs`, a hit is `partial` and `cacheFreshness` stays `unknown`. The map drops the oldest entry past its cap. `expiresAt` is always null.
 
 ## What the tests in this increment actually ran
 

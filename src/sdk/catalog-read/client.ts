@@ -3,8 +3,10 @@ import {
   AVAILABILITY_UNSUPPORTED_MESSAGE,
   CAPABILITY_UNKNOWN_MESSAGE,
   isAllowlistedReadTool,
+  MANIFEST_REDIRECT_MESSAGE,
   PRICE_UNSUPPORTED_MESSAGE,
   QUOTE_UNSUPPORTED_MESSAGE,
+  READ_AUTH_SCOPE,
   READ_TOOL_ALLOWLIST,
   VARIANTS_UNSUPPORTED_MESSAGE,
 } from './policy';
@@ -33,6 +35,7 @@ import type {
 } from './types';
 import { SCHEMA_VERSION } from './types';
 import type { ReadTransport, RpcRequest, RpcResponse } from './transport';
+import { assertPartitionRef } from './transport';
 import {
   parseAvailabilityInput,
   parsePriceInput,
@@ -54,6 +57,8 @@ export interface CatalogReadOptions {
   /** When set, a cache hit older than this is stale. It does not invent source freshness. */
   staleAfterMs?: number;
   deadlineMs?: number;
+  /** Used only when this client creates the cache. A shared cache keeps its own cap. */
+  maxCacheEntries?: number;
   cache?: MemoryReadCache;
 }
 
@@ -158,6 +163,7 @@ export class CatalogReadClient {
   private readonly staleAfterMs: number | null;
   private readonly deadlineMs: number;
   private readonly cache: MemoryReadCache;
+  private readonly partitionRef: string;
   private manifest: Manifest | null = null;
 
   constructor(options: CatalogReadOptions) {
@@ -179,7 +185,11 @@ export class CatalogReadClient {
     if (options.staleAfterMs !== undefined && (!Number.isInteger(options.staleAfterMs) || options.staleAfterMs < 0)) {
       throw new TypeError('staleAfterMs must be a non-negative integer.');
     }
+    if (options.maxCacheEntries !== undefined && options.cache) {
+      throw new TypeError('Pass maxCacheEntries to MemoryReadCache, or omit cache.');
+    }
     this.transport = options.transport;
+    this.partitionRef = assertPartitionRef(options.transport.partitionRef);
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? defaultId;
     this.sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
@@ -187,7 +197,16 @@ export class CatalogReadClient {
     this.backoffMs = backoff;
     this.staleAfterMs = options.staleAfterMs ?? null;
     this.deadlineMs = deadline;
-    this.cache = options.cache ?? new MemoryReadCache();
+    this.cache = options.cache ?? new MemoryReadCache(options.maxCacheEntries ?? 64);
+  }
+
+  private documentKey(operation: string, scope: string, parts: Record<string, string | number>, adapterVersion: string | null): string {
+    const version = adapterVersion ?? 'none';
+    return cacheKey(operation, scope, parts, {
+      partitionRef: this.partitionRef,
+      authScope: READ_AUTH_SCOPE,
+      adapterVersion: version,
+    });
   }
 
   async searchProducts(input: SearchInput): Promise<ReadEnvelope<SearchData>> {
@@ -198,7 +217,7 @@ export class CatalogReadClient {
     if (!loaded.manifest.tools.has('search_products')) {
       return this.policyError(parsed.value, 'UNSUPPORTED', 'search_products is not in the server manifest.');
     }
-    const key = cacheKey('search', parsed.value.cacheScope, { q: parsed.value.query, limit: parsed.value.limit });
+    const key = this.documentKey('search', parsed.value.cacheScope, { q: parsed.value.query, limit: parsed.value.limit }, loaded.manifest.adapterVersion);
     const hit = this.readCache<SearchData>(key, parsed.value);
     if (hit) return hit;
     const result = await this.readAllowlisted('search_products', { query: parsed.value.query, limit: parsed.value.limit }, parsed.value, loaded.manifest.adapterVersion);
@@ -218,7 +237,7 @@ export class CatalogReadClient {
     if (!loaded.manifest.tools.has('get_product')) {
       return this.policyError(parsed.value, 'UNSUPPORTED', 'get_product is not in the server manifest.');
     }
-    const key = cacheKey('product', parsed.value.cacheScope, { ref: parsed.value.productRef });
+    const key = this.documentKey('product', parsed.value.cacheScope, { ref: parsed.value.productRef }, loaded.manifest.adapterVersion);
     const hit = this.readCache<ProductData>(key, parsed.value);
     if (hit) return hit;
     const result = await this.readAllowlisted('get_product', { slug: parsed.value.productRef }, parsed.value, loaded.manifest.adapterVersion);
@@ -238,7 +257,7 @@ export class CatalogReadClient {
     const charts =
       loaded.manifest.tools.has('list_variant_charts') && loaded.manifest.tools.has('get_variant_chart');
     if (!charts) return this.policyError(parsed.value, 'UNSUPPORTED', VARIANTS_UNSUPPORTED_MESSAGE);
-    const key = cacheKey('variants', parsed.value.cacheScope, { chart: parsed.value.chartRef });
+    const key = this.documentKey('variants', parsed.value.cacheScope, { chart: parsed.value.chartRef }, loaded.manifest.adapterVersion);
     const hit = this.readCache<VariantsData>(key, parsed.value);
     if (hit) return hit;
     const result = await this.readAllowlisted('get_variant_chart', { chart: parsed.value.chartRef }, parsed.value, loaded.manifest.adapterVersion);
@@ -344,13 +363,16 @@ export class CatalogReadClient {
     requestId: string | null,
     data: T | null,
     errors: ClientError[],
-    provenance: Provenance,
+    provenance: Omit<Provenance, 'partitionRef' | 'authScope'>,
     observation: Observation,
     components: Components,
     status: ReadEnvelope<T>['status'] = errors.length ? 'error' : 'ok',
     warnings: ClientWarning[] = [],
   ): ReadEnvelope<T> {
     const resolvedStatus = errors.length && status === 'ok' ? 'error' : status;
+    const sourceRef = provenance.sourceRef.endsWith(`#${this.partitionRef}`)
+      ? provenance.sourceRef
+      : `${provenance.sourceRef}#${this.partitionRef}`;
     return {
       schemaVersion: SCHEMA_VERSION,
       profile: 'catalog-read',
@@ -360,7 +382,12 @@ export class CatalogReadClient {
       data: resolvedStatus === 'error' ? null : data,
       errors,
       warnings,
-      provenance,
+      provenance: {
+        ...provenance,
+        sourceRef,
+        partitionRef: this.partitionRef,
+        authScope: READ_AUTH_SCOPE,
+      },
       observation,
       components,
     };
@@ -379,14 +406,20 @@ export class CatalogReadClient {
     const response = await this.rpc({ jsonrpc: '2.0', id: this.newId(), method: 'tools/list', params: {} }, signal);
     if (!response.ok) {
       if (response.failure.code === 'CANCELLED_LOCAL') return { ok: false, envelope: this.cancelled(requestId) };
+      const redirected = response.failure.code === 'UPSTREAM_UNAVAILABLE' && /redirect/i.test(response.failure.message);
       const manifestUnread = response.failure.code === 'TIMEOUT' || response.failure.code === 'UPSTREAM_UNAVAILABLE';
       const code = manifestUnread ? 'CAPABILITY_UNKNOWN' : response.failure.code;
+      const message = redirected
+        ? MANIFEST_REDIRECT_MESSAGE
+        : manifestUnread
+          ? CAPABILITY_UNKNOWN_MESSAGE
+          : response.failure.message;
       return {
         ok: false,
         envelope: this.policyError(
           { requestId },
           code,
-          manifestUnread ? CAPABILITY_UNKNOWN_MESSAGE : response.failure.message,
+          message,
           'mcp',
           'rpc:tools/list',
           null,
@@ -428,17 +461,18 @@ export class CatalogReadClient {
   private readCache<T>(key: string, call: CommonCall): ReadEnvelope<T> | null {
     if (call.refresh) return null;
     const record = this.cache.get(key);
-    if (!record) return null;
+    if (!record || record.partitionRef !== this.partitionRef || record.authScope !== READ_AUTH_SCOPE) return null;
     const nowMs = this.now().getTime();
     const age = Math.max(0, nowMs - record.storedAtMs);
-    const stale = this.staleAfterMs != null && age > this.staleAfterMs;
+    const ageKnown = this.staleAfterMs != null;
+    const stale = ageKnown && age > this.staleAfterMs;
     const observation: Observation = {
       fetchedAt: record.fetchedAt,
       cachedAt: new Date(record.storedAtMs).toISOString(),
       cacheAgeMs: age,
       upstreamObservedAt: record.upstreamObservedAt,
       sourceUpdatedAt: record.sourceUpdatedAt,
-      cacheFreshness: this.staleAfterMs == null ? 'unknown' : stale ? 'stale' : 'fresh',
+      cacheFreshness: !ageKnown ? 'unknown' : stale ? 'stale' : 'fresh',
       expiresAt: null,
     };
     if (stale && call.rejectStale) {
@@ -452,9 +486,16 @@ export class CatalogReadClient {
         'error',
       );
     }
-    const warnings = stale
-      ? [...record.warnings, { code: 'STALE_DATA', message: 'Served from the in-memory cache. The upstream observation time was not moved forward.' }]
-      : record.warnings;
+    const warnings = [...record.warnings];
+    if (stale) {
+      warnings.push({ code: 'STALE_DATA', message: 'Served from the in-memory cache. The upstream observation time was not moved forward.' });
+    }
+    if (!ageKnown) {
+      warnings.push({
+        code: 'CACHE_AGE_UNCERTIFIED',
+        message: 'Served from the in-memory cache with no freshness policy. The age is not certified and the upstream observation time was not moved forward.',
+      });
+    }
     return this.okEnvelope(
       call.requestId,
       record.data as T,
@@ -462,7 +503,7 @@ export class CatalogReadClient {
       { sourceKind: 'client-cache', sourceRef: record.sourceRef, adapterVersion: record.adapterVersion },
       observation,
       record.components,
-      stale || record.partial ? 'partial' : 'ok',
+      stale || !ageKnown || record.partial ? 'partial' : 'ok',
       warnings,
     );
   }
@@ -493,7 +534,9 @@ export class CatalogReadClient {
       upstreamObservedAt: projected.upstreamObservedAt,
       sourceUpdatedAt: projected.sourceUpdatedAt,
       adapterVersion,
-      sourceRef,
+      sourceRef: `${sourceRef}#${this.partitionRef}`,
+      partitionRef: this.partitionRef,
+      authScope: READ_AUTH_SCOPE,
       data: projected.data,
       components,
       warnings: projected.warnings,
@@ -541,7 +584,8 @@ export class CatalogReadClient {
       }
       last = response.failure;
       if (!response.failure.retryable || attempt === this.maxAttempts) break;
-      if (this.backoffMs > 0) await this.sleep(this.backoffMs);
+      const stillWaiting = await this.pause(call.signal);
+      if (!stillWaiting) return { ok: false, envelope: this.cancelled(call.requestId) };
     }
     return {
       ok: false,
@@ -584,10 +628,25 @@ export class CatalogReadClient {
         failure: { code: 'UPSTREAM_UNAVAILABLE', message: redactPublicMessage(error instanceof Error ? error.message : ''), retryable: true },
       };
     }
-    return this.interpret(response);
+    return this.interpret(response, request.id);
   }
 
-  private interpret(response: RpcResponse): { ok: true; payload: unknown; adapterVersion: string | null } | { ok: false; failure: AttemptFailure } {
+  private async pause(signal: AbortSignal | undefined): Promise<boolean> {
+    if (signal?.aborted) return false;
+    if (this.backoffMs <= 0) return true;
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<boolean>(resolve => {
+      if (!signal) return;
+      onAbort = () => resolve(false);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    const slept = this.sleep(this.backoffMs).then(() => true);
+    const finished = await Promise.race([slept, aborted]);
+    if (signal && onAbort) signal.removeEventListener('abort', onAbort);
+    return finished && !signal?.aborted;
+  }
+
+  private interpret(response: RpcResponse, expectedId: string): { ok: true; payload: unknown; adapterVersion: string | null } | { ok: false; failure: AttemptFailure } {
     if (response.status === 401) {
       return { ok: false, failure: { code: 'AUTH_REQUIRED', message: 'The server required authentication. This client does not attach a credential or try a different one.', retryable: false } };
     }
@@ -606,6 +665,16 @@ export class CatalogReadClient {
     const body = response.body;
     if (!body || typeof body !== 'object') {
       return { ok: false, failure: { code: 'UPSTREAM_UNAVAILABLE', message: 'The endpoint did not return a JSON-RPC object.', retryable: true } };
+    }
+    if ((body as { id?: unknown }).id !== expectedId) {
+      return {
+        ok: false,
+        failure: {
+          code: 'CONTRACT_MISMATCH',
+          message: 'The JSON-RPC response id did not match the request. The document was discarded.',
+          retryable: false,
+        },
+      };
     }
     const error = (body as { error?: unknown }).error;
     if (error && typeof error === 'object') {
