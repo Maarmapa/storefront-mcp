@@ -678,6 +678,41 @@ template is for the cases it does not cover:
   for you what its checkout tool checks. Here the refusals are in your repo,
   reviewable, and the ones that protect a third party are not configurable.
 
+## Catalog read client
+
+`src/sdk/catalog-read` is an unpublished TypeScript client for catalog reads
+(search, product, variants, and explicit unsupported responses for
+availability, price, and quote). It calls the MCP server. It is not a second
+server and it is not an npm package: `tsconfig.build.json` does not compile it
+into the published tarball, and this repo does not register a new MCP name for
+it.
+
+The client allowlist is `search_products`, `get_product`, and the variant-chart
+pair when `tools/list` announces both. It does not call `get_quote`, checkout,
+stock alerts, or token-gated ops tools, and it does not send `Authorization`
+or store secrets in `localStorage`. `get_quote` stays unsupported because that
+tool's contract includes `payment_link`; dropping the field after the call
+would not undo an effect the handler already performed. Display prices are
+passed through as non-binding references. `sourceUpdatedAt` stays null when
+the server omits it.
+
+```ts
+import { CatalogReadClient, createHttpTransport } from './src/sdk/catalog-read';
+
+const client = new CatalogReadClient({
+  transport: createHttpTransport('https://shop.example.com/api/mcp'),
+});
+
+const found = await client.searchProducts({ query: 'warm gray marker', limit: 8 });
+const quote = await client.quoteCart({
+  lines: [{ variantRef: 'SYN-SKU', qty: 2 }],
+  currency: 'CLP',
+});
+// quote.errors[0].code === 'UNSUPPORTED' — get_quote was not called
+```
+
+Contract, the quote note, and which checks actually ran: `src/sdk/catalog-read/README.md`.
+
 ## Repository layout
 
 ```
@@ -701,6 +736,7 @@ src/app/api/stock-alert/confirm/route.ts  Next.js transport for the confirmation
 src/lib/adapters/memory.ts    reference adapter (all five contracts, one stock source, real holds)
 src/lib/adapters/woocommerce.ts  Store API skeleton — implements only what it can answer
 src/lib/adapters/index.ts     adapter registry (env CATALOG_ADAPTER)
+src/sdk/catalog-read/         unpublished read client (not in the npm tarball)
 examples/toy-catalog.json     the demo data, incl. a separate `inventory` section
 server.json                   MCP Registry manifest (registry.modelcontextprotocol.io)
 tsconfig.build.json           compiles lib + cli to dist/ for the npm bin
@@ -783,6 +819,15 @@ JSON-RPC por HTTP en localhost, con el chequeo real de
 Next.js) y además la página de confirmación de opt-in en
 `/api/stock-alert/confirm`. El adaptador se elige con `CATALOG_ADAPTER`
 (`memory` por defecto, `woocommerce` para el esqueleto de la Store API).
+
+## Cliente de lectura de catálogo
+
+`src/sdk/catalog-read` es un cliente TypeScript no publicado: busca, ficha y,
+si el manifiesto anuncia las dos tools, cartas de variante. Disponibilidad,
+precio y cotización responden `UNSUPPORTED` y no inventan stock ni totales.
+No llama `get_quote` (el contrato puede traer `payment_link`), no envía
+`Authorization` y no guarda secretos en `localStorage`. No es un paquete npm
+ni un namespace MCP nuevo. Detalle en `src/sdk/catalog-read/README.md`.
 
 ## Qué es
 

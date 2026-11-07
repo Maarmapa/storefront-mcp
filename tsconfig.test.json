@@ -11,6 +11,6 @@
     "declaration": false,
     "types": ["node"]
   },
-  "include": ["src/lib/**/*.ts", "tests/**/*.ts"],
+  "include": ["src/lib/**/*.ts", "src/sdk/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist", "dist-test", "src/app"]
 }
